@@ -1,5 +1,12 @@
 """Deterministic runtime engine infrastructure."""
 
+from open_world_rpg.engine.dependencies import (
+    EngineSubsystemBase,
+    MissingSubsystemDependencyError,
+    SubsystemDependencyCycleError,
+    SubsystemDependencyError,
+    resolve_subsystem_order,
+)
 from open_world_rpg.engine.runtime import (
     EngineRuntime,
     EngineRuntimeError,
@@ -42,11 +49,15 @@ __all__ = [
     "EngineRuntimeState",
     "EngineRuntimeStateError",
     "EngineSubsystem",
+    "EngineSubsystemBase",
     "EngineTimingError",
     "FixedStepConfig",
     "FixedStepScheduler",
     "FrameSchedule",
+    "MissingSubsystemDependencyError",
     "MonotonicClock",
+    "SubsystemDependencyCycleError",
+    "SubsystemDependencyError",
     "SubsystemExecutionError",
     "SubsystemFailure",
     "SubsystemRegistry",
@@ -54,4 +65,5 @@ __all__ = [
     "SubsystemRegistryState",
     "SubsystemRegistryStateError",
     "SubsystemShutdownError",
+    "resolve_subsystem_order",
 ]

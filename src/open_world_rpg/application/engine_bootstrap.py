@@ -15,6 +15,7 @@ from open_world_rpg.engine import (
     FixedStepConfig,
     FixedStepScheduler,
     SubsystemRegistry,
+    resolve_subsystem_order,
 )
 
 
@@ -71,7 +72,7 @@ def create_engine_runtime(
     runtime_logger = application.logger if logger is None else logger
 
     return EngineRuntime(
-        registry=SubsystemRegistry(subsystems),
+        registry=SubsystemRegistry(resolve_subsystem_order(subsystems)),
         scheduler=FixedStepScheduler(fixed_step_config_from_game_config(application.config)),
         clock=clock,
         logger=runtime_logger,

@@ -538,3 +538,79 @@ def test_run_engine_application_allows_unbounded_execution(
     assert snapshot.stop_reason == "test_completed"
     assert application.state is ApplicationState.STOPPED
     assert application.context.state is SessionState.TERMINATED
+
+
+class DependencyOrderedSubsystem:
+    """Subsystem exposing explicit startup dependencies."""
+
+    def __init__(
+        self,
+        name: str,
+        events: list[str],
+        *,
+        dependencies: tuple[str, ...] = (),
+    ) -> None:
+        self.name = name
+        self.dependencies = dependencies
+        self.events = events
+
+    def start(self) -> None:
+        self.events.append(f"{self.name}:start")
+
+    def update(self, fixed_delta_seconds: float) -> None:
+        del fixed_delta_seconds
+
+    def render(self, interpolation_alpha: float) -> None:
+        del interpolation_alpha
+
+    def stop(self) -> None:
+        self.events.append(f"{self.name}:stop")
+
+
+def test_create_engine_runtime_resolves_subsystem_dependencies(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    application = create_test_application(tmp_path)
+    render_system = DependencyOrderedSubsystem(
+        "render",
+        events,
+        dependencies=("world",),
+    )
+    input_system = DependencyOrderedSubsystem(
+        "input",
+        events,
+    )
+    world_system = DependencyOrderedSubsystem(
+        "world",
+        events,
+        dependencies=("input",),
+    )
+
+    engine = create_engine_runtime(
+        application=application,
+        subsystems=[
+            render_system,
+            input_system,
+            world_system,
+        ],
+        clock=SequenceClock(0),
+    )
+
+    assert engine.registry.subsystem_names == (
+        "input",
+        "world",
+        "render",
+    )
+
+    engine.start()
+    engine.shutdown()
+
+    assert events == [
+        "input:start",
+        "world:start",
+        "render:start",
+        "render:stop",
+        "world:stop",
+        "input:stop",
+    ]
