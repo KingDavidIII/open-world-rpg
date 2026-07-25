@@ -20,6 +20,15 @@ from open_world_rpg.engine import (
     create_engine_context,
     resolve_subsystem_order,
 )
+from open_world_rpg.world import (
+    WorldId,
+    WorldModel,
+    WorldRuntime,
+    WorldSeed,
+    WorldSpecification,
+    WorldSubsystem,
+    WorldTimeConfig,
+)
 
 
 class EngineApplicationError(RuntimeError):
@@ -93,6 +102,79 @@ def create_engine_runtime(
         scheduler=FixedStepScheduler(fixed_step_config_from_game_config(application.config)),
         clock=clock,
         context=context,
+    )
+
+
+def create_world_model(
+    *,
+    application: GameApplication,
+    name: str | None = None,
+) -> WorldModel:
+    """Create a default world using application identity and simulation rules."""
+    if not isinstance(application, GameApplication):
+        raise TypeError("application must be a GameApplication.")
+
+    world_name = application.config.title if name is None else name
+    specification = WorldSpecification(
+        name=world_name,
+        seed=WorldSeed(value=application.config.simulation.world_seed),
+        time_config=WorldTimeConfig(
+            ticks_per_second=application.config.simulation.tick_rate,
+        ),
+    )
+    return WorldModel.create(
+        specification=specification,
+        created_at=application.context.created_at,
+        world_id=WorldId(value=application.context.session_id),
+    )
+
+
+def create_world_runtime(
+    *,
+    application: GameApplication,
+    name: str | None = None,
+    event_bus: EventBus | None = None,
+) -> WorldRuntime:
+    """Create a controlled world runtime from an application."""
+    if event_bus is not None and not isinstance(event_bus, EventBus):
+        raise TypeError("event_bus must be an EventBus or None.")
+
+    return WorldRuntime(
+        model=create_world_model(
+            application=application,
+            name=name,
+        ),
+        event_bus=event_bus,
+    )
+
+
+def create_world_engine_runtime(
+    *,
+    application: GameApplication,
+    name: str | None = None,
+    subsystems: Iterable[EngineSubsystem] = (),
+    clock: EngineClock | None = None,
+    logger: logging.Logger | None = None,
+    event_bus: EventBus | None = None,
+    service_registrations: Iterable[EngineServiceRegistration] = (),
+) -> EngineRuntime:
+    """Create an engine with a wired world runtime and world subsystem."""
+    resolved_event_bus = EventBus() if event_bus is None else event_bus
+    world_runtime = create_world_runtime(
+        application=application,
+        name=name,
+        event_bus=resolved_event_bus,
+    )
+    return create_engine_runtime(
+        application=application,
+        subsystems=(WorldSubsystem(), *tuple(subsystems)),
+        clock=clock,
+        logger=logger,
+        event_bus=resolved_event_bus,
+        service_registrations=(
+            EngineServiceRegistration(WorldRuntime, world_runtime),
+            *tuple(service_registrations),
+        ),
     )
 
 
