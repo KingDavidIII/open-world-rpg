@@ -298,3 +298,48 @@ def test_json_formatter_includes_persistence_context() -> None:
     assert payload["schema_version"] == 1
     assert payload["saved_session_id"] == "1234"
     assert payload["saved_session_state"] == "active"
+
+
+def test_json_formatter_includes_engine_context() -> None:
+    formatter = JsonLogFormatter()
+    record = logging.LogRecord(
+        name=LOGGER_NAME,
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=50,
+        msg="Engine updates were dropped",
+        args=(),
+        exc_info=None,
+    )
+    record.event = "engine.updates_dropped"
+    record.engine_state = "running"
+    record.engine_operation = "frame_execution"
+    record.subsystem_count = 3
+    record.frame_index = 7
+    record.frame_elapsed_ns = 500_000_000
+    record.frame_simulated_elapsed_ns = 250_000_000
+    record.frame_update_count = 8
+    record.frame_dropped_update_count = 22
+    record.interpolation_alpha = 0.5
+    record.cumulative_frame_count = 8
+    record.cumulative_update_count = 35
+    record.cumulative_dropped_update_count = 22
+    record.stop_reason = "frame_limit"
+    record.cleanup_failed = True
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload["engine_state"] == "running"
+    assert payload["engine_operation"] == "frame_execution"
+    assert payload["subsystem_count"] == 3
+    assert payload["frame_index"] == 7
+    assert payload["frame_elapsed_ns"] == 500_000_000
+    assert payload["frame_simulated_elapsed_ns"] == 250_000_000
+    assert payload["frame_update_count"] == 8
+    assert payload["frame_dropped_update_count"] == 22
+    assert payload["interpolation_alpha"] == 0.5
+    assert payload["cumulative_frame_count"] == 8
+    assert payload["cumulative_update_count"] == 35
+    assert payload["cumulative_dropped_update_count"] == 22
+    assert payload["stop_reason"] == "frame_limit"
+    assert payload["cleanup_failed"] is True

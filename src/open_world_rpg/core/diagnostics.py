@@ -23,6 +23,20 @@ _CONTEXT_FIELDS: Final = (
     "schema_version",
     "saved_session_id",
     "saved_session_state",
+    "engine_state",
+    "engine_operation",
+    "subsystem_count",
+    "frame_index",
+    "frame_elapsed_ns",
+    "frame_simulated_elapsed_ns",
+    "frame_update_count",
+    "frame_dropped_update_count",
+    "interpolation_alpha",
+    "cumulative_frame_count",
+    "cumulative_update_count",
+    "cumulative_dropped_update_count",
+    "stop_reason",
+    "cleanup_failed",
 )
 
 

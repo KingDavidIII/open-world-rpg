@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -74,6 +75,7 @@ class EngineRuntime:
         "_dropped_update_count",
         "_frame_count",
         "_last_schedule",
+        "_logger",
         "_registry",
         "_scheduler",
         "_state",
@@ -87,6 +89,7 @@ class EngineRuntime:
         registry: SubsystemRegistry,
         scheduler: FixedStepScheduler | None = None,
         clock: EngineClock | None = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         if not isinstance(registry, SubsystemRegistry):
             raise TypeError("registry must be a SubsystemRegistry.")
@@ -102,9 +105,16 @@ class EngineRuntime:
         if not isinstance(resolved_clock, EngineClock):
             raise TypeError("clock must implement EngineClock.")
 
+        resolved_logger = (
+            logging.getLogger("open_world_rpg.engine.runtime") if logger is None else logger
+        )
+        if not isinstance(resolved_logger, logging.Logger):
+            raise TypeError("logger must be a logging.Logger.")
+
         self._registry = registry
         self._scheduler = resolved_scheduler
         self._clock = resolved_clock
+        self._logger = resolved_logger
         self._state = EngineRuntimeState.CREATED
         self._frame_count = 0
         self._update_count = 0
@@ -131,6 +141,11 @@ class EngineRuntime:
     def clock(self) -> EngineClock:
         """Return the engine clock."""
         return self._clock
+
+    @property
+    def logger(self) -> logging.Logger:
+        """Return the structured runtime logger."""
+        return self._logger
 
     @property
     def frame_count(self) -> int:
@@ -177,11 +192,27 @@ class EngineRuntime:
         )
         self._scheduler.reset()
 
+        self._logger.info(
+            "Engine runtime starting.",
+            extra=self._diagnostic_context(
+                event="engine.starting",
+            ),
+        )
+
         try:
             self._registry.start()
         except Exception as exc:
             cleanup_error = self._cleanup_registry()
             self._state = EngineRuntimeState.FAILED
+
+            self._logger.exception(
+                "Engine runtime failed to start.",
+                extra=self._diagnostic_context(
+                    event="engine.start_failed",
+                    operation="start",
+                    cleanup_error=cleanup_error,
+                ),
+            )
 
             raise EngineRuntimeExecutionError(
                 operation="start",
@@ -191,12 +222,21 @@ class EngineRuntime:
 
         self._state = EngineRuntimeState.RUNNING
 
+        self._logger.info(
+            "Engine runtime started.",
+            extra=self._diagnostic_context(
+                event="engine.started",
+            ),
+        )
+
     def run_frame(self) -> FrameSchedule:
         """Execute one scheduled engine frame."""
         self._require_state(
             EngineRuntimeState.RUNNING,
             operation="run a frame",
         )
+
+        schedule: FrameSchedule | None = None
 
         try:
             timestamp_ns = self._clock.now_ns()
@@ -211,6 +251,16 @@ class EngineRuntime:
             cleanup_error = self._cleanup_registry()
             self._state = EngineRuntimeState.FAILED
 
+            self._logger.exception(
+                "Engine frame execution failed.",
+                extra=self._diagnostic_context(
+                    event="engine.frame_failed",
+                    operation="frame_execution",
+                    schedule=schedule,
+                    cleanup_error=cleanup_error,
+                ),
+            )
+
             raise EngineRuntimeExecutionError(
                 operation="frame execution",
                 cause=exc,
@@ -220,6 +270,23 @@ class EngineRuntime:
         self._frame_count += 1
         self._dropped_update_count += schedule.dropped_update_count
         self._last_schedule = schedule
+
+        if schedule.dropped_update_count > 0:
+            self._logger.warning(
+                "Engine updates were dropped.",
+                extra=self._diagnostic_context(
+                    event="engine.updates_dropped",
+                    schedule=schedule,
+                ),
+            )
+
+        self._logger.debug(
+            "Engine frame completed.",
+            extra=self._diagnostic_context(
+                event="engine.frame_completed",
+                schedule=schedule,
+            ),
+        )
 
         return schedule
 
@@ -241,15 +308,39 @@ class EngineRuntime:
         self._stop_reason = reason
         self._state = EngineRuntimeState.STOP_REQUESTED
 
+        self._logger.info(
+            "Engine stop requested.",
+            extra=self._diagnostic_context(
+                event="engine.stop_requested",
+            ),
+        )
+
     def shutdown(self) -> None:
         """Stop all managed subsystems."""
         if self._state is EngineRuntimeState.STOPPED:
             return
 
+        self._logger.info(
+            "Engine runtime stopping.",
+            extra=self._diagnostic_context(
+                event="engine.stopping",
+            ),
+        )
+
         try:
             self._registry.shutdown()
         except Exception as exc:
             self._state = EngineRuntimeState.FAILED
+
+            self._logger.exception(
+                "Engine runtime shutdown failed.",
+                extra=self._diagnostic_context(
+                    event="engine.shutdown_failed",
+                    operation="shutdown",
+                    cleanup_error=exc,
+                ),
+            )
+
             raise EngineRuntimeExecutionError(
                 operation="shutdown",
                 cause=exc,
@@ -259,6 +350,13 @@ class EngineRuntime:
             self._stop_reason = "shutdown"
 
         self._state = EngineRuntimeState.STOPPED
+
+        self._logger.info(
+            "Engine runtime stopped.",
+            extra=self._diagnostic_context(
+                event="engine.stopped",
+            ),
+        )
 
     def run(
         self,
@@ -294,6 +392,46 @@ class EngineRuntime:
             return exc
 
         return None
+
+    def _diagnostic_context(
+        self,
+        *,
+        event: str,
+        operation: str | None = None,
+        schedule: FrameSchedule | None = None,
+        cleanup_error: Exception | None = None,
+    ) -> dict[str, object]:
+        context: dict[str, object] = {
+            "event": event,
+            "engine_state": self._state.value,
+            "subsystem_count": self._registry.subsystem_count,
+            "cumulative_frame_count": self._frame_count,
+            "cumulative_update_count": self._update_count,
+            "cumulative_dropped_update_count": (self._dropped_update_count),
+        }
+
+        if operation is not None:
+            context["engine_operation"] = operation
+
+        if self._stop_reason is not None:
+            context["stop_reason"] = self._stop_reason
+
+        if cleanup_error is not None:
+            context["cleanup_failed"] = True
+
+        if schedule is not None:
+            context.update(
+                {
+                    "frame_index": schedule.frame_index,
+                    "frame_elapsed_ns": schedule.elapsed_ns,
+                    "frame_simulated_elapsed_ns": (schedule.simulated_elapsed_ns),
+                    "frame_update_count": (schedule.update_count),
+                    "frame_dropped_update_count": (schedule.dropped_update_count),
+                    "interpolation_alpha": (schedule.interpolation_alpha),
+                }
+            )
+
+        return context
 
     def _require_state(
         self,
