@@ -8,22 +8,24 @@ gameplay systems, and persistent save support.
 
 ## Current milestone
 
-**v0.3.0 - Engine Foundation**
+**v0.4.0 - World Foundation**
 
-The engine foundation includes:
+The world foundation includes:
 
-- Deterministic fixed-step simulation timing
-- Monotonic clock validation and bounded frame catch-up
-- Ordered subsystem lifecycle management
-- Startup rollback and reverse-order subsystem shutdown
-- Dependency-aware subsystem construction
-- Deterministic engine runtime orchestration
-- Structured engine lifecycle and frame diagnostics
-- Application-to-engine bootstrap integration
-- Deterministic queued event delivery
-- Explicit before-update, after-update, before-render, and after-render phases
-- Typed shared-service context and subsystem service binding
-- 567 passing tests with 100% statement and branch coverage
+- Deterministic world, chunk, region, and local coordinate models
+- Negative-coordinate-safe spatial conversion
+- World identity, metadata, and lifecycle
+- Deterministic integer-only world calendar and clock
+- Stable BLAKE2b generation keys for regions and chunks
+- Immutable WorldSpecification and WorldModel aggregate
+- Controlled WorldRuntime mutation and revision tracking
+- World lifecycle and time events
+- Engine-integrated WorldSubsystem
+- Region and chunk lifecycle metadata
+- Deterministic RegionChunkIndex ordering and boundaries
+- Structured world diagnostics
+- End-to-end application, engine, and world acceptance coverage
+- 1,091 passing tests with 100% statement and branch coverage
 
 ## Requirements
 

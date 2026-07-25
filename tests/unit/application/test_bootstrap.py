@@ -87,7 +87,7 @@ def test_run_application_returns_success_and_stops(
     assert exit_code == 0
     assert application.state is ApplicationState.STOPPED
     assert application.context.state is SessionState.TERMINATED
-    assert output.getvalue() == ("Open World RPG v0.3.0 - runtime initialised.\n")
+    assert output.getvalue() == ("Open World RPG v0.4.0 - runtime initialised.\n")
 
 
 def test_run_application_uses_standard_output_by_default(
@@ -100,7 +100,7 @@ def test_run_application_uses_standard_output_by_default(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert captured.out == "Open World RPG v0.3.0 - runtime initialised.\n"
+    assert captured.out == "Open World RPG v0.4.0 - runtime initialised.\n"
 
 
 def test_run_application_marks_output_failure(
