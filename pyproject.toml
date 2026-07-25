@@ -1,0 +1,100 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-world-rpg"
+version = "0.1.0"
+description = "A procedurally generated open-world RPG survival game."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { file = "LICENSE" }
+authors = [
+    { name = "King David" }
+]
+keywords = [
+    "game",
+    "pygame",
+    "procedural-generation",
+    "open-world",
+    "rpg",
+    "survival"
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment :: Role-Playing"
+]
+dependencies = [
+    "pygame-ce>=2.5.5,<3"
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.17,<2",
+    "pre-commit>=4.2,<5",
+    "pytest>=8.4,<9",
+    "pytest-cov>=6.2,<7",
+    "ruff>=0.12,<1"
+]
+
+[project.scripts]
+open-world-rpg = "open_world_rpg.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/open_world_rpg"]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "--cov=open_world_rpg",
+    "--cov-report=term-missing"
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["open_world_rpg"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 80
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "C4",
+    "RUF"
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["open_world_rpg"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+packages = ["open_world_rpg"]
+warn_unreachable = true
+show_error_codes = true
