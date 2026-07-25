@@ -1,5 +1,13 @@
 """Deterministic runtime engine infrastructure."""
 
+from open_world_rpg.engine.runtime import (
+    EngineRuntime,
+    EngineRuntimeError,
+    EngineRuntimeExecutionError,
+    EngineRuntimeSnapshot,
+    EngineRuntimeState,
+    EngineRuntimeStateError,
+)
 from open_world_rpg.engine.subsystems import (
     DuplicateSubsystemError,
     EngineSubsystem,
@@ -27,6 +35,12 @@ __all__ = [
     "ClockRegressionError",
     "DuplicateSubsystemError",
     "EngineClock",
+    "EngineRuntime",
+    "EngineRuntimeError",
+    "EngineRuntimeExecutionError",
+    "EngineRuntimeSnapshot",
+    "EngineRuntimeState",
+    "EngineRuntimeStateError",
     "EngineSubsystem",
     "EngineTimingError",
     "FixedStepConfig",
