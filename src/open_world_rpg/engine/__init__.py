@@ -18,6 +18,9 @@ from open_world_rpg.engine.events import (
     EventSubscriptionError,
 )
 from open_world_rpg.engine.runtime import (
+    EngineEventDispatch,
+    EngineEventPhase,
+    EngineEventPhaseError,
     EngineRuntime,
     EngineRuntimeError,
     EngineRuntimeExecutionError,
@@ -52,6 +55,9 @@ __all__ = [
     "ClockRegressionError",
     "DuplicateSubsystemError",
     "EngineClock",
+    "EngineEventDispatch",
+    "EngineEventPhase",
+    "EngineEventPhaseError",
     "EngineRuntime",
     "EngineRuntimeError",
     "EngineRuntimeExecutionError",

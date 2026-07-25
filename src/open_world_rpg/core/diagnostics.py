@@ -37,6 +37,12 @@ _CONTEXT_FIELDS: Final = (
     "cumulative_dropped_update_count",
     "stop_reason",
     "cleanup_failed",
+    "event_phase",
+    "event_phase_update_index",
+    "event_dispatch_count",
+    "event_handler_invocation_count",
+    "event_dispatch_failure_count",
+    "pending_event_count",
 )
 
 

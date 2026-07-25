@@ -614,3 +614,20 @@ def test_create_engine_runtime_resolves_subsystem_dependencies(
         "world:stop",
         "input:stop",
     ]
+
+
+def test_create_engine_runtime_accepts_event_bus(
+    tmp_path: Path,
+) -> None:
+    from open_world_rpg.engine import EventBus
+
+    application = create_test_application(tmp_path)
+    event_bus = EventBus()
+
+    engine = create_engine_runtime(
+        application=application,
+        clock=SequenceClock(0),
+        event_bus=event_bus,
+    )
+
+    assert engine.event_bus is event_bus
