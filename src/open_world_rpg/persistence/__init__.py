@@ -9,6 +9,14 @@ from open_world_rpg.persistence.document import (
     SaveDocumentError,
     SessionSnapshot,
 )
+from open_world_rpg.persistence.repository import (
+    SaveReadError,
+    SaveRepository,
+    SaveRepositoryError,
+    SaveSerialisationError,
+    SaveSlotNotFoundError,
+    SaveWriteError,
+)
 from open_world_rpg.persistence.storage import (
     MAX_SAVE_SLOT_LENGTH,
     SAVE_FILE_SUFFIX,
@@ -29,7 +37,13 @@ __all__ = [
     "SaveCorruptionError",
     "SaveDocument",
     "SaveDocumentError",
+    "SaveReadError",
+    "SaveRepository",
+    "SaveRepositoryError",
+    "SaveSerialisationError",
     "SaveSlot",
+    "SaveSlotNotFoundError",
+    "SaveWriteError",
     "SessionSnapshot",
     "StorageError",
     "StoragePreparationError",
