@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, datetime
+from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -20,16 +23,37 @@ from open_world_rpg.application.session import (
     SessionState,
     SessionTransitionError,
 )
-from open_world_rpg.core import GameConfig, RuntimeEnvironment, SimulationConfig
+from open_world_rpg.core import (
+    GameConfig,
+    JsonLogFormatter,
+    RuntimeEnvironment,
+    SimulationConfig,
+)
 
 FIXED_TIME = datetime(2026, 7, 25, 10, 0, tzinfo=UTC)
 SESSION_ID = UUID("12345678-1234-5678-1234-567812345678")
+
+
+def create_test_logger(stream: StringIO | None = None) -> logging.Logger:
+    logger = logging.Logger(
+        "test.open_world_rpg",
+        level=logging.DEBUG,
+    )
+    logger.propagate = False
+
+    if stream is not None:
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonLogFormatter())
+        logger.addHandler(handler)
+
+    return logger
 
 
 def create_test_application(
     tmp_path: Path,
     *,
     world_seed: int = 0,
+    logger: logging.Logger | None = None,
 ) -> GameApplication:
     config = GameConfig(
         environment=RuntimeEnvironment.TEST,
@@ -49,7 +73,12 @@ def create_test_application(
     return GameApplication(
         config=config,
         context=context,
+        logger=create_test_logger() if logger is None else logger,
     )
+
+
+def read_log_payloads(stream: StringIO) -> list[dict[str, object]]:
+    return [json.loads(line) for line in stream.getvalue().splitlines() if line]
 
 
 def test_application_starts_in_created_state(tmp_path: Path) -> None:
@@ -123,6 +152,40 @@ def test_stopping_an_already_stopped_application_is_harmless(
     assert application.state is ApplicationState.STOPPED
 
 
+def test_lifecycle_emits_structured_diagnostic_events(
+    tmp_path: Path,
+) -> None:
+    stream = StringIO()
+    application = create_test_application(
+        tmp_path,
+        logger=create_test_logger(stream),
+    )
+
+    application.start()
+    application.pause()
+    application.resume()
+    application.stop()
+
+    payloads = read_log_payloads(stream)
+
+    assert [payload["event"] for payload in payloads] == [
+        "application.starting",
+        "session.activated",
+        "application.running",
+        "session.paused",
+        "session.resumed",
+        "application.stopping",
+        "session.terminated",
+        "application.stopped",
+    ]
+
+    for payload in payloads:
+        assert payload["session_id"] == str(SESSION_ID)
+        assert payload["world_seed"] == 0
+        assert "application_state" in payload
+        assert "session_state" in payload
+
+
 def test_start_rejects_duplicate_start(tmp_path: Path) -> None:
     application = create_test_application(tmp_path)
     application.start()
@@ -148,11 +211,15 @@ def test_unstarted_application_rejects_runtime_operations(
         getattr(application, operation)()
 
 
-def test_start_failure_marks_application_failed(
+def test_start_failure_marks_application_failed_and_logs_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    application = create_test_application(tmp_path)
+    stream = StringIO()
+    application = create_test_application(
+        tmp_path,
+        logger=create_test_logger(stream),
+    )
 
     def raise_directory_error(
         self: Path,
@@ -168,12 +235,51 @@ def test_start_failure_marks_application_failed(
     with pytest.raises(OSError, match="runtime storage unavailable"):
         application.start()
 
+    payloads = read_log_payloads(stream)
+
     assert application.state is ApplicationState.FAILED
     assert application.context.state is SessionState.CREATED
+    assert payloads[-1]["event"] == "application.start_failed"
+    assert "OSError: runtime storage unavailable" in payloads[-1]["exception"]
 
 
-def test_stop_failure_marks_application_failed(tmp_path: Path) -> None:
-    application = create_test_application(tmp_path)
+def test_pause_failure_is_logged(tmp_path: Path) -> None:
+    stream = StringIO()
+    application = create_test_application(
+        tmp_path,
+        logger=create_test_logger(stream),
+    )
+    application.start()
+    application.pause()
+
+    with pytest.raises(SessionTransitionError, match="Cannot pause session"):
+        application.pause()
+
+    assert read_log_payloads(stream)[-1]["event"] == "session.pause_failed"
+
+
+def test_resume_failure_is_logged(tmp_path: Path) -> None:
+    stream = StringIO()
+    application = create_test_application(
+        tmp_path,
+        logger=create_test_logger(stream),
+    )
+    application.start()
+
+    with pytest.raises(SessionTransitionError, match="Cannot resume session"):
+        application.resume()
+
+    assert read_log_payloads(stream)[-1]["event"] == "session.resume_failed"
+
+
+def test_stop_failure_marks_application_failed_and_logs_error(
+    tmp_path: Path,
+) -> None:
+    stream = StringIO()
+    application = create_test_application(
+        tmp_path,
+        logger=create_test_logger(stream),
+    )
     application.start()
     application.context.fail()
 
@@ -183,17 +289,30 @@ def test_stop_failure_marks_application_failed(tmp_path: Path) -> None:
     ):
         application.stop()
 
+    payload = read_log_payloads(stream)[-1]
+
     assert application.state is ApplicationState.FAILED
+    assert payload["event"] == "application.stop_failed"
 
 
 def test_application_can_be_marked_failed(tmp_path: Path) -> None:
-    application = create_test_application(tmp_path)
+    stream = StringIO()
+    application = create_test_application(
+        tmp_path,
+        logger=create_test_logger(stream),
+    )
     application.start()
 
     application.fail()
 
+    payloads = read_log_payloads(stream)
+
     assert application.state is ApplicationState.FAILED
     assert application.context.state is SessionState.FAILED
+    assert [payload["event"] for payload in payloads[-2:]] == [
+        "session.failed",
+        "application.failed",
+    ]
 
 
 def test_stopped_application_cannot_be_marked_failed(
@@ -219,12 +338,21 @@ def test_application_rejects_invalid_constructor_values(
         GameApplication(
             config=cast(Any, object()),
             context=application.context,
+            logger=application.logger,
         )
 
     with pytest.raises(TypeError, match="context"):
         GameApplication(
             config=application.config,
             context=cast(Any, object()),
+            logger=application.logger,
+        )
+
+    with pytest.raises(TypeError, match="logger"):
+        GameApplication(
+            config=application.config,
+            context=application.context,
+            logger=cast(Any, object()),
         )
 
 
@@ -243,4 +371,5 @@ def test_application_rejects_context_seed_mismatch(
         GameApplication(
             config=application.config,
             context=mismatched_context,
+            logger=application.logger,
         )

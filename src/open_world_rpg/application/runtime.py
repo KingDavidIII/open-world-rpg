@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -26,10 +27,11 @@ class ApplicationLifecycleError(RuntimeError):
 
 @dataclass(slots=True)
 class GameApplication:
-    """Own the configuration, session context, and process lifecycle."""
+    """Own configuration, session context, diagnostics, and process lifecycle."""
 
     config: GameConfig
     context: RuntimeContext
+    logger: logging.Logger
     _state: ApplicationState = field(
         default=ApplicationState.CREATED,
         init=False,
@@ -42,6 +44,9 @@ class GameApplication:
 
         if not isinstance(self.context, RuntimeContext):
             raise TypeError("context must be a RuntimeContext.")
+
+        if not isinstance(self.logger, logging.Logger):
+            raise TypeError("logger must be a logging.Logger.")
 
         if self.context.world_seed != self.config.simulation.world_seed:
             raise ValueError("Runtime context seed must match the configured world seed.")
@@ -63,23 +68,57 @@ class GameApplication:
             operation="start",
         )
         self._state = ApplicationState.STARTING
+        self._log_event(
+            level=logging.INFO,
+            event="application.starting",
+            message="Application startup initiated.",
+        )
 
         try:
             self._create_runtime_directories()
             self.context.start()
         except Exception:
             self._state = ApplicationState.FAILED
+            self.logger.exception(
+                "Application startup failed.",
+                extra=self._diagnostic_context(event="application.start_failed"),
+            )
             raise
 
+        self._log_event(
+            level=logging.INFO,
+            event="session.activated",
+            message="Game session activated.",
+        )
+
         self._state = ApplicationState.RUNNING
+        self._log_event(
+            level=logging.INFO,
+            event="application.running",
+            message="Application runtime started.",
+        )
 
     def pause(self) -> None:
-        """Pause gameplay while keeping the application process running."""
+        """Pause gameplay while keeping the process running."""
         self._require_state(
             expected=ApplicationState.RUNNING,
             operation="pause",
         )
-        self.context.pause()
+
+        try:
+            self.context.pause()
+        except Exception:
+            self.logger.exception(
+                "Game session could not be paused.",
+                extra=self._diagnostic_context(event="session.pause_failed"),
+            )
+            raise
+
+        self._log_event(
+            level=logging.INFO,
+            event="session.paused",
+            message="Game session paused.",
+        )
 
     def resume(self) -> None:
         """Resume a paused game session."""
@@ -87,7 +126,21 @@ class GameApplication:
             expected=ApplicationState.RUNNING,
             operation="resume",
         )
-        self.context.resume()
+
+        try:
+            self.context.resume()
+        except Exception:
+            self.logger.exception(
+                "Game session could not be resumed.",
+                extra=self._diagnostic_context(event="session.resume_failed"),
+            )
+            raise
+
+        self._log_event(
+            level=logging.INFO,
+            event="session.resumed",
+            message="Game session resumed.",
+        )
 
     def stop(self) -> None:
         """Stop a running application.
@@ -101,15 +154,36 @@ class GameApplication:
             expected=ApplicationState.RUNNING,
             operation="stop",
         )
+
         self._state = ApplicationState.STOPPING
+        self._log_event(
+            level=logging.INFO,
+            event="application.stopping",
+            message="Application shutdown initiated.",
+        )
 
         try:
             self.context.terminate()
         except Exception:
             self._state = ApplicationState.FAILED
+            self.logger.exception(
+                "Application shutdown failed.",
+                extra=self._diagnostic_context(event="application.stop_failed"),
+            )
             raise
 
+        self._log_event(
+            level=logging.INFO,
+            event="session.terminated",
+            message="Game session terminated.",
+        )
+
         self._state = ApplicationState.STOPPED
+        self._log_event(
+            level=logging.INFO,
+            event="application.stopped",
+            message="Application runtime stopped.",
+        )
 
     def fail(self) -> None:
         """Mark the application and its active session as failed."""
@@ -117,7 +191,18 @@ class GameApplication:
             raise ApplicationLifecycleError("A stopped application cannot be marked as failed.")
 
         self.context.fail()
+        self._log_event(
+            level=logging.ERROR,
+            event="session.failed",
+            message="Game session entered the failed state.",
+        )
+
         self._state = ApplicationState.FAILED
+        self._log_event(
+            level=logging.ERROR,
+            event="application.failed",
+            message="Application entered the failed state.",
+        )
 
     def _create_runtime_directories(self) -> None:
         for directory in (
@@ -125,6 +210,28 @@ class GameApplication:
             self.config.paths.log_directory,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+
+    def _diagnostic_context(self, *, event: str) -> dict[str, object]:
+        return {
+            "event": event,
+            "session_id": str(self.context.session_id),
+            "world_seed": self.context.world_seed,
+            "application_state": self._state.value,
+            "session_state": self.context.state.value,
+        }
+
+    def _log_event(
+        self,
+        *,
+        level: int,
+        event: str,
+        message: str,
+    ) -> None:
+        self.logger.log(
+            level,
+            message,
+            extra=self._diagnostic_context(event=event),
+        )
 
     def _require_state(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from io import StringIO
 from pathlib import Path
 from typing import TextIO, cast
@@ -14,7 +15,8 @@ from open_world_rpg.application.bootstrap import (
 )
 from open_world_rpg.application.runtime import ApplicationState
 from open_world_rpg.application.session import GameMode, SessionState
-from open_world_rpg.core import RuntimeEnvironment
+from open_world_rpg.core import LOGGER_NAME, RuntimeEnvironment
+from open_world_rpg.core.diagnostics import reset_runtime_logging
 
 
 class BrokenOutput:
@@ -26,6 +28,13 @@ class BrokenOutput:
 
     def flush(self) -> None:
         return None
+
+
+@pytest.fixture(autouse=True)
+def clean_runtime_logger() -> None:
+    reset_runtime_logging()
+    yield
+    reset_runtime_logging()
 
 
 def test_create_application_uses_current_directory(
@@ -40,22 +49,28 @@ def test_create_application_uses_current_directory(
     assert application.config.environment is RuntimeEnvironment.DEVELOPMENT
     assert application.context.game_mode is GameMode.NEW_GAME
     assert application.context.world_seed == application.config.simulation.world_seed
+    assert application.logger.name == LOGGER_NAME
     assert application.state is ApplicationState.CREATED
     assert application.context.state is SessionState.CREATED
+    assert (tmp_path / "logs" / "open-world-rpg.log").is_file()
 
 
-def test_create_application_accepts_explicit_configuration(
+def test_create_application_accepts_explicit_configuration_and_logger(
     tmp_path: Path,
 ) -> None:
+    logger = logging.Logger("injected")
+
     application = create_application(
         project_root=tmp_path,
         environment=RuntimeEnvironment.TEST,
         game_mode=GameMode.LOADED_GAME,
+        logger=logger,
     )
 
     assert application.config.paths.project_root == tmp_path.resolve()
     assert application.config.environment is RuntimeEnvironment.TEST
     assert application.context.game_mode is GameMode.LOADED_GAME
+    assert application.logger is logger
 
 
 def test_run_application_returns_success_and_stops(
