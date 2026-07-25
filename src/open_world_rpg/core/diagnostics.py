@@ -19,6 +19,10 @@ _CONTEXT_FIELDS: Final = (
     "world_seed",
     "application_state",
     "session_state",
+    "save_slot",
+    "schema_version",
+    "saved_session_id",
+    "saved_session_state",
 )
 
 

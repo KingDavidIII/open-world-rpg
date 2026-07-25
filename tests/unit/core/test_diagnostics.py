@@ -273,3 +273,28 @@ def test_reset_runtime_logging_accepts_explicit_logger(
     reset_runtime_logging(logger)
 
     assert logger.handlers == []
+
+
+def test_json_formatter_includes_persistence_context() -> None:
+    formatter = JsonLogFormatter()
+    record = logging.LogRecord(
+        name=LOGGER_NAME,
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=40,
+        msg="Save completed",
+        args=(),
+        exc_info=None,
+    )
+    record.event = "persistence.save_succeeded"
+    record.save_slot = "campaign-01"
+    record.schema_version = 1
+    record.saved_session_id = "1234"
+    record.saved_session_state = "active"
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload["save_slot"] == "campaign-01"
+    assert payload["schema_version"] == 1
+    assert payload["saved_session_id"] == "1234"
+    assert payload["saved_session_state"] == "active"
