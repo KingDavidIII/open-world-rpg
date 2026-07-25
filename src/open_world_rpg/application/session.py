@@ -139,6 +139,39 @@ class RuntimeContext:
             _clock=resolved_clock,
         )
 
+    @classmethod
+    def restore(
+        cls,
+        *,
+        session_id: UUID,
+        game_mode: GameMode,
+        world_seed: int,
+        state: SessionState,
+        clock: Clock | None = None,
+    ) -> RuntimeContext:
+        """Restore a previously saved resumable session."""
+        if not isinstance(state, SessionState):
+            raise TypeError("state must be a SessionState.")
+
+        if state not in {
+            SessionState.ACTIVE,
+            SessionState.PAUSED,
+        }:
+            raise ValueError("state must represent an active or paused session.")
+
+        context = cls.create(
+            session_id=session_id,
+            game_mode=game_mode,
+            world_seed=world_seed,
+            clock=clock,
+        )
+        context.start()
+
+        if state is SessionState.PAUSED:
+            context.pause()
+
+        return context
+
     @property
     def state(self) -> SessionState:
         """Return the current session state."""

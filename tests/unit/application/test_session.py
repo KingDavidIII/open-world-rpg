@@ -332,3 +332,79 @@ def test_create_context_rejects_non_callable_clock() -> None:
             clock=cast(Any, 100),
             session_id=SESSION_ID,
         )
+
+
+def test_restore_creates_active_saved_session() -> None:
+    restored_at = BASE_TIME + timedelta(minutes=1)
+    started_at = restored_at + timedelta(seconds=1)
+
+    context = RuntimeContext.restore(
+        session_id=SESSION_ID,
+        game_mode=GameMode.LOADED_GAME,
+        world_seed=9001,
+        state=SessionState.ACTIVE,
+        clock=sequence_clock(restored_at, started_at),
+    )
+
+    assert context.session_id == SESSION_ID
+    assert context.game_mode is GameMode.LOADED_GAME
+    assert context.world_seed == 9001
+    assert context.created_at == restored_at
+    assert context.started_at == started_at
+    assert context.state is SessionState.ACTIVE
+    assert context.is_active is True
+
+
+def test_restore_recreates_paused_saved_session() -> None:
+    restored_at = BASE_TIME + timedelta(minutes=1)
+    started_at = restored_at + timedelta(seconds=1)
+    paused_at = restored_at + timedelta(seconds=2)
+
+    context = RuntimeContext.restore(
+        session_id=SESSION_ID,
+        game_mode=GameMode.NEW_GAME,
+        world_seed=42,
+        state=SessionState.PAUSED,
+        clock=sequence_clock(
+            restored_at,
+            started_at,
+            paused_at,
+        ),
+    )
+
+    assert context.state is SessionState.PAUSED
+    assert context.started_at == started_at
+    assert context.paused_at == paused_at
+    assert context.is_paused is True
+
+
+def test_restore_rejects_invalid_state_type() -> None:
+    with pytest.raises(TypeError, match="state must be a SessionState"):
+        RuntimeContext.restore(
+            session_id=SESSION_ID,
+            game_mode=GameMode.NEW_GAME,
+            world_seed=42,
+            state=cast(Any, "active"),
+            clock=sequence_clock(BASE_TIME),
+        )
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        SessionState.CREATED,
+        SessionState.TERMINATED,
+        SessionState.FAILED,
+    ],
+)
+def test_restore_rejects_non_resumable_state(
+    state: SessionState,
+) -> None:
+    with pytest.raises(ValueError, match="active or paused"):
+        RuntimeContext.restore(
+            session_id=SESSION_ID,
+            game_mode=GameMode.NEW_GAME,
+            world_seed=42,
+            state=state,
+            clock=sequence_clock(BASE_TIME),
+        )
