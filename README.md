@@ -8,23 +8,22 @@ gameplay systems, and persistent save support.
 
 ## Current milestone
 
-**v0.2.0 - Core Architecture**
+**v0.3.0 - Engine Foundation**
 
-The core architecture includes:
+The engine foundation includes:
 
-- Immutable and strictly validated runtime configuration
-- Deterministic world-seed configuration
-- Explicit application bootstrap and lifecycle management
-- Runtime session identity and controlled state transitions
-- Structured JSON runtime diagnostics
-- Safe runtime directory and save-slot management
-- Atomic UTF-8 save-file writes
-- Versioned save-game documents
-- Strict save corruption and compatibility detection
-- Save-document repository operations
-- Application-level save and load services
-- Resumable session restoration
-- End-to-end save, load, and restoration integration tests
+- Deterministic fixed-step simulation timing
+- Monotonic clock validation and bounded frame catch-up
+- Ordered subsystem lifecycle management
+- Startup rollback and reverse-order subsystem shutdown
+- Dependency-aware subsystem construction
+- Deterministic engine runtime orchestration
+- Structured engine lifecycle and frame diagnostics
+- Application-to-engine bootstrap integration
+- Deterministic queued event delivery
+- Explicit before-update, after-update, before-render, and after-render phases
+- Typed shared-service context and subsystem service binding
+- 567 passing tests with 100% statement and branch coverage
 
 ## Requirements
 
