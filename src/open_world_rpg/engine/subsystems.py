@@ -129,6 +129,11 @@ class SubsystemRegistry:
         return tuple(subsystem.name for subsystem in self._subsystems)
 
     @property
+    def subsystems(self) -> tuple[EngineSubsystem, ...]:
+        """Return registered subsystem objects in execution order."""
+        return tuple(self._subsystems)
+
+    @property
     def started_subsystem_names(self) -> tuple[str, ...]:
         """Return successfully started subsystems in startup order."""
         return tuple(subsystem.name for subsystem in self._started)

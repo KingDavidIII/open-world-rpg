@@ -11,11 +11,13 @@ from open_world_rpg.engine import (
     EngineClock,
     EngineRuntime,
     EngineRuntimeSnapshot,
+    EngineServiceRegistration,
     EngineSubsystem,
     EventBus,
     FixedStepConfig,
     FixedStepScheduler,
     SubsystemRegistry,
+    create_engine_context,
     resolve_subsystem_order,
 )
 
@@ -66,19 +68,31 @@ def create_engine_runtime(
     clock: EngineClock | None = None,
     logger: logging.Logger | None = None,
     event_bus: EventBus | None = None,
+    service_registrations: Iterable[EngineServiceRegistration] = (),
 ) -> EngineRuntime:
     """Construct an engine runtime from application configuration."""
     if not isinstance(application, GameApplication):
         raise TypeError("application must be a GameApplication.")
 
     runtime_logger = application.logger if logger is None else logger
+    resolved_event_bus = EventBus() if event_bus is None else event_bus
+    context = create_engine_context(
+        logger=runtime_logger,
+        event_bus=resolved_event_bus,
+        registrations=(
+            EngineServiceRegistration(
+                GameConfig,
+                application.config,
+            ),
+            *tuple(service_registrations),
+        ),
+    )
 
     return EngineRuntime(
         registry=SubsystemRegistry(resolve_subsystem_order(subsystems)),
         scheduler=FixedStepScheduler(fixed_step_config_from_game_config(application.config)),
         clock=clock,
-        logger=runtime_logger,
-        event_bus=event_bus,
+        context=context,
     )
 
 

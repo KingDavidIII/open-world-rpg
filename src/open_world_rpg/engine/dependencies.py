@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from open_world_rpg.engine.services import (
+    EngineContext,
+    EngineContextBindingError,
+    EngineContextUnavailableError,
+)
 from open_world_rpg.engine.subsystems import (
     DuplicateSubsystemError,
     EngineSubsystem,
@@ -48,7 +53,7 @@ class SubsystemDependencyCycleError(SubsystemDependencyError):
 class EngineSubsystemBase:
     """Reusable no-op subsystem with validated identity and dependencies."""
 
-    __slots__ = ("_dependencies", "_name")
+    __slots__ = ("_context", "_dependencies", "_name")
 
     def __init__(
         self,
@@ -61,6 +66,7 @@ class EngineSubsystemBase:
             description="subsystem name",
         )
         self._dependencies = _normalise_dependencies(dependencies)
+        self._context: EngineContext | None = None
 
     @property
     def name(self) -> str:
@@ -71,6 +77,45 @@ class EngineSubsystemBase:
     def dependencies(self) -> tuple[str, ...]:
         """Return required subsystem names in declaration order."""
         return self._dependencies
+
+    @property
+    def services_bound(self) -> bool:
+        """Return whether an engine context has been bound."""
+        return self._context is not None
+
+    @property
+    def context(self) -> EngineContext:
+        """Return the bound engine context."""
+        if self._context is None:
+            raise EngineContextUnavailableError(f"Subsystem {self.name!r} has no engine context.")
+
+        return self._context
+
+    def bind_services(
+        self,
+        context: EngineContext,
+    ) -> None:
+        """Bind this subsystem to one engine context."""
+        if not isinstance(context, EngineContext):
+            raise TypeError("context must be an EngineContext.")
+
+        if self._context is None:
+            self._context = context
+            return
+
+        if self._context is context:
+            return
+
+        raise EngineContextBindingError(
+            f"Subsystem {self.name!r} is already bound to another engine context."
+        )
+
+    def require_service(
+        self,
+        service_type: type[object],
+    ) -> object:
+        """Resolve a required service from the bound context."""
+        return self.context.resolve(service_type)
 
     def start(self) -> None:
         """Acquire resources and initialise the subsystem."""

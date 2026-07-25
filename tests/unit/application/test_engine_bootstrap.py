@@ -30,7 +30,9 @@ from open_world_rpg.engine import (
     EngineRuntime,
     EngineRuntimeExecutionError,
     EngineRuntimeState,
+    EngineServiceRegistration,
     EngineSubsystem,
+    EngineSubsystemBase,
 )
 
 
@@ -631,3 +633,57 @@ def test_create_engine_runtime_accepts_event_bus(
     )
 
     assert engine.event_bus is event_bus
+
+
+class CustomEngineService:
+    """Application-provided engine service."""
+
+
+class ContextAwareSubsystem(EngineSubsystemBase):
+    """Subsystem that reads services during startup."""
+
+    def __init__(self) -> None:
+        super().__init__(name="context_aware")
+        self.config: GameConfig | None = None
+        self.custom_service: CustomEngineService | None = None
+
+    def start(self) -> None:
+        self.config = cast(
+            GameConfig,
+            self.require_service(GameConfig),
+        )
+        self.custom_service = cast(
+            CustomEngineService,
+            self.require_service(CustomEngineService),
+        )
+
+
+def test_create_engine_runtime_registers_application_services(
+    tmp_path: Path,
+) -> None:
+    application = create_test_application(tmp_path)
+    custom_service = CustomEngineService()
+    subsystem = ContextAwareSubsystem()
+
+    engine = create_engine_runtime(
+        application=application,
+        subsystems=[subsystem],
+        clock=SequenceClock(0),
+        service_registrations=[
+            EngineServiceRegistration(
+                CustomEngineService,
+                custom_service,
+            )
+        ],
+    )
+
+    assert engine.context.resolve(GameConfig) is application.config
+    assert engine.context.resolve(CustomEngineService) is custom_service
+    assert subsystem.context is engine.context
+
+    engine.start()
+
+    assert subsystem.config is application.config
+    assert subsystem.custom_service is custom_service
+
+    engine.shutdown()

@@ -11,6 +11,11 @@ from open_world_rpg.engine.events import (
     EventDispatchError,
     EventDispatchReport,
 )
+from open_world_rpg.engine.services import (
+    EngineContext,
+    bind_subsystem_services,
+    create_engine_context,
+)
 from open_world_rpg.engine.subsystems import SubsystemRegistry
 from open_world_rpg.engine.timing import (
     EngineClock,
@@ -121,6 +126,7 @@ class EngineRuntime:
 
     __slots__ = (
         "_clock",
+        "_context",
         "_dropped_update_count",
         "_event_bus",
         "_frame_count",
@@ -142,6 +148,7 @@ class EngineRuntime:
         clock: EngineClock | None = None,
         logger: logging.Logger | None = None,
         event_bus: EventBus | None = None,
+        context: EngineContext | None = None,
     ) -> None:
         if not isinstance(registry, SubsystemRegistry):
             raise TypeError("registry must be a SubsystemRegistry.")
@@ -157,21 +164,52 @@ class EngineRuntime:
         if not isinstance(resolved_clock, EngineClock):
             raise TypeError("clock must implement EngineClock.")
 
-        resolved_logger = (
-            logging.getLogger("open_world_rpg.engine.runtime") if logger is None else logger
-        )
-        if not isinstance(resolved_logger, logging.Logger):
-            raise TypeError("logger must be a logging.Logger.")
+        if context is not None:
+            if not isinstance(context, EngineContext):
+                raise TypeError("context must be an EngineContext.")
 
-        resolved_event_bus = EventBus() if event_bus is None else event_bus
-        if not isinstance(resolved_event_bus, EventBus):
-            raise TypeError("event_bus must be an EventBus.")
+            if logger is not None and logger is not context.logger:
+                raise ValueError("logger must match context.logger.")
+
+            if event_bus is not None and event_bus is not context.event_bus:
+                raise ValueError("event_bus must match context.event_bus.")
+
+            resolved_context = context
+            resolved_logger = context.logger
+            resolved_event_bus = context.event_bus
+        else:
+            resolved_logger = (
+                logging.getLogger("open_world_rpg.engine.runtime") if logger is None else logger
+            )
+            if not isinstance(
+                resolved_logger,
+                logging.Logger,
+            ):
+                raise TypeError("logger must be a logging.Logger.")
+
+            resolved_event_bus = EventBus() if event_bus is None else event_bus
+            if not isinstance(
+                resolved_event_bus,
+                EventBus,
+            ):
+                raise TypeError("event_bus must be an EventBus.")
+
+            resolved_context = create_engine_context(
+                logger=resolved_logger,
+                event_bus=resolved_event_bus,
+            )
+
+        bind_subsystem_services(
+            registry.subsystems,
+            resolved_context,
+        )
 
         self._registry = registry
         self._scheduler = resolved_scheduler
         self._clock = resolved_clock
         self._logger = resolved_logger
         self._event_bus = resolved_event_bus
+        self._context = resolved_context
         self._state = EngineRuntimeState.CREATED
         self._frame_count = 0
         self._update_count = 0
@@ -212,6 +250,11 @@ class EngineRuntime:
     def event_bus(self) -> EventBus:
         """Return the managed engine event bus."""
         return self._event_bus
+
+    @property
+    def context(self) -> EngineContext:
+        """Return the shared engine runtime context."""
+        return self._context
 
     @property
     def frame_count(self) -> int:
