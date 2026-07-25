@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from open_world_rpg.application import create_application, run_application
+
 
 def main() -> int:
-    """Start the game application."""
-    print("Open World RPG v0.1.0 — foundation initialised.")
-    return 0
+    """Construct and execute the game application."""
+    return run_application(create_application())
 
 
 if __name__ == "__main__":  # pragma: no cover

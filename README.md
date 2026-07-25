@@ -8,17 +8,23 @@ gameplay systems, and persistent save support.
 
 ## Current milestone
 
-**v0.1.0 - Project Foundation**
+**v0.2.0 - Core Architecture**
 
-The initial repository foundation includes:
+The core architecture includes:
 
-- A `src`-based Python package layout
-- Module and installed command-line entry points
-- Ruff formatting and linting
-- Strict static type checking with mypy
-- Automated testing with pytest
-- Test coverage enforcement
-- Separate application, engine, entity, gameplay, persistence, UI, and world packages
+- Immutable and strictly validated runtime configuration
+- Deterministic world-seed configuration
+- Explicit application bootstrap and lifecycle management
+- Runtime session identity and controlled state transitions
+- Structured JSON runtime diagnostics
+- Safe runtime directory and save-slot management
+- Atomic UTF-8 save-file writes
+- Versioned save-game documents
+- Strict save corruption and compatibility detection
+- Save-document repository operations
+- Application-level save and load services
+- Resumable session restoration
+- End-to-end save, load, and restoration integration tests
 
 ## Requirements
 
