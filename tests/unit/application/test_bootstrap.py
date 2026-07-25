@@ -13,6 +13,7 @@ from open_world_rpg.application.bootstrap import (
     run_application,
 )
 from open_world_rpg.application.runtime import ApplicationState
+from open_world_rpg.application.session import GameMode, SessionState
 from open_world_rpg.core import RuntimeEnvironment
 
 
@@ -37,7 +38,10 @@ def test_create_application_uses_current_directory(
 
     assert application.config.paths.project_root == tmp_path.resolve()
     assert application.config.environment is RuntimeEnvironment.DEVELOPMENT
+    assert application.context.game_mode is GameMode.NEW_GAME
+    assert application.context.world_seed == application.config.simulation.world_seed
     assert application.state is ApplicationState.CREATED
+    assert application.context.state is SessionState.CREATED
 
 
 def test_create_application_accepts_explicit_configuration(
@@ -46,10 +50,12 @@ def test_create_application_accepts_explicit_configuration(
     application = create_application(
         project_root=tmp_path,
         environment=RuntimeEnvironment.TEST,
+        game_mode=GameMode.LOADED_GAME,
     )
 
     assert application.config.paths.project_root == tmp_path.resolve()
     assert application.config.environment is RuntimeEnvironment.TEST
+    assert application.context.game_mode is GameMode.LOADED_GAME
 
 
 def test_run_application_returns_success_and_stops(
@@ -65,6 +71,7 @@ def test_run_application_returns_success_and_stops(
 
     assert exit_code == 0
     assert application.state is ApplicationState.STOPPED
+    assert application.context.state is SessionState.TERMINATED
     assert output.getvalue() == ("Open World RPG v0.1.0 - runtime initialised.\n")
 
 
@@ -91,3 +98,4 @@ def test_run_application_marks_output_failure(
         run_application(application, output=output)
 
     assert application.state is ApplicationState.FAILED
+    assert application.context.state is SessionState.FAILED

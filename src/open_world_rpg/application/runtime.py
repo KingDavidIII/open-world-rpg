@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from open_world_rpg.application.session import RuntimeContext
 from open_world_rpg.core import GameConfig
 
 
@@ -25,14 +26,25 @@ class ApplicationLifecycleError(RuntimeError):
 
 @dataclass(slots=True)
 class GameApplication:
-    """Own the configuration and lifecycle of one game process."""
+    """Own the configuration, session context, and process lifecycle."""
 
     config: GameConfig
+    context: RuntimeContext
     _state: ApplicationState = field(
         default=ApplicationState.CREATED,
         init=False,
         repr=False,
     )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.config, GameConfig):
+            raise TypeError("config must be a GameConfig.")
+
+        if not isinstance(self.context, RuntimeContext):
+            raise TypeError("context must be a RuntimeContext.")
+
+        if self.context.world_seed != self.config.simulation.world_seed:
+            raise ValueError("Runtime context seed must match the configured world seed.")
 
     @property
     def state(self) -> ApplicationState:
@@ -41,7 +53,7 @@ class GameApplication:
 
     @property
     def is_running(self) -> bool:
-        """Return whether the application is currently running."""
+        """Return whether the application process is currently running."""
         return self._state is ApplicationState.RUNNING
 
     def start(self) -> None:
@@ -54,11 +66,28 @@ class GameApplication:
 
         try:
             self._create_runtime_directories()
-        except OSError:
+            self.context.start()
+        except Exception:
             self._state = ApplicationState.FAILED
             raise
 
         self._state = ApplicationState.RUNNING
+
+    def pause(self) -> None:
+        """Pause gameplay while keeping the application process running."""
+        self._require_state(
+            expected=ApplicationState.RUNNING,
+            operation="pause",
+        )
+        self.context.pause()
+
+    def resume(self) -> None:
+        """Resume a paused game session."""
+        self._require_state(
+            expected=ApplicationState.RUNNING,
+            operation="resume",
+        )
+        self.context.resume()
 
     def stop(self) -> None:
         """Stop a running application.
@@ -73,13 +102,21 @@ class GameApplication:
             operation="stop",
         )
         self._state = ApplicationState.STOPPING
+
+        try:
+            self.context.terminate()
+        except Exception:
+            self._state = ApplicationState.FAILED
+            raise
+
         self._state = ApplicationState.STOPPED
 
     def fail(self) -> None:
-        """Mark the application as failed."""
+        """Mark the application and its active session as failed."""
         if self._state is ApplicationState.STOPPED:
             raise ApplicationLifecycleError("A stopped application cannot be marked as failed.")
 
+        self.context.fail()
         self._state = ApplicationState.FAILED
 
     def _create_runtime_directories(self) -> None:

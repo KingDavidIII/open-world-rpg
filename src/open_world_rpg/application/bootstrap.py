@@ -8,6 +8,7 @@ from typing import TextIO
 
 from open_world_rpg import __version__
 from open_world_rpg.application.runtime import GameApplication
+from open_world_rpg.application.session import GameMode, RuntimeContext
 from open_world_rpg.core import GameConfig, RuntimeEnvironment
 
 
@@ -15,15 +16,22 @@ def create_application(
     *,
     project_root: Path | None = None,
     environment: RuntimeEnvironment = RuntimeEnvironment.DEVELOPMENT,
+    game_mode: GameMode = GameMode.NEW_GAME,
 ) -> GameApplication:
-    """Construct a configured game application."""
+    """Construct a configured game application and runtime session."""
     root = Path.cwd() if project_root is None else project_root
+    config = GameConfig.create_default(
+        project_root=root,
+        environment=environment,
+    )
+    context = RuntimeContext.create(
+        game_mode=game_mode,
+        world_seed=config.simulation.world_seed,
+    )
 
     return GameApplication(
-        config=GameConfig.create_default(
-            project_root=root,
-            environment=environment,
-        )
+        config=config,
+        context=context,
     )
 
 
