@@ -90,10 +90,11 @@ def bind_subsystem(
     *,
     runtime: WorldRuntime,
     config: GameConfig,
+    logger: logging.Logger | None = None,
 ) -> None:
     event_bus = EventBus()
     context = create_engine_context(
-        logger=logging.Logger("test.world.subsystem"),
+        logger=logging.Logger("test.world.subsystem") if logger is None else logger,
         event_bus=event_bus,
         registrations=(
             EngineServiceRegistration(WorldRuntime, runtime),
@@ -365,3 +366,94 @@ def test_repeated_start_rejected_and_restart_after_stop_resumes(
 
     assert subsystem.started is True
     assert runtime.model.metadata.state is WorldState.ACTIVE
+
+
+class RecordingHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def test_subsystem_emits_start_update_and_stop_diagnostics(
+    tmp_path: Path,
+) -> None:
+    logger = logging.Logger("test.world.subsystem.diagnostics")
+    logger.setLevel(logging.DEBUG)
+    handler = RecordingHandler()
+    logger.addHandler(handler)
+    subsystem = WorldSubsystem()
+    runtime = create_runtime()
+    bind_subsystem(
+        subsystem,
+        runtime=runtime,
+        config=create_config(tmp_path),
+        logger=logger,
+    )
+
+    subsystem.start()
+    subsystem.update(1.0 / 60.0)
+    subsystem.stop()
+
+    assert subsystem.logger is logger
+    assert [record.event for record in handler.records] == [
+        "world.subsystem_start_requested",
+        "world.subsystem_started",
+        "world.subsystem_fixed_update_completed",
+        "world.subsystem_stopping",
+        "world.subsystem_stopped",
+    ]
+    update_record = handler.records[2]
+    assert update_record.world_state == "active"
+    assert update_record.world_revision == 3
+    assert update_record.world_tick == 1
+    assert update_record.world_seed == 42
+    assert update_record.world_tick_rate == 60
+
+
+@pytest.mark.parametrize(
+    ("runtime", "config", "message"),
+    [
+        (
+            create_runtime(seed=41),
+            None,
+            "World seed must match",
+        ),
+        (
+            create_runtime(ticks_per_second=59),
+            None,
+            "World ticks_per_second must match",
+        ),
+    ],
+)
+def test_subsystem_compatibility_failures_emit_rejection_diagnostics(
+    tmp_path: Path,
+    runtime: WorldRuntime,
+    config: GameConfig | None,
+    message: str,
+) -> None:
+    del config
+    logger = logging.Logger("test.world.subsystem.rejection")
+    logger.setLevel(logging.DEBUG)
+    handler = RecordingHandler()
+    logger.addHandler(handler)
+    subsystem = WorldSubsystem()
+    bind_subsystem(
+        subsystem,
+        runtime=runtime,
+        config=create_config(tmp_path),
+        logger=logger,
+    )
+
+    with pytest.raises(WorldSubsystemConfigurationError, match=message):
+        subsystem.start()
+
+    assert [record.event for record in handler.records] == [
+        "world.subsystem_start_requested",
+        "world.subsystem_startup_rejected",
+    ]
+    rejected = handler.records[-1]
+    assert rejected.world_seed == runtime.model.specification.seed.value
+    assert rejected.world_tick_rate == runtime.model.specification.time_config.ticks_per_second

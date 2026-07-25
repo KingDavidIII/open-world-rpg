@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -9,6 +10,7 @@ from uuid import UUID
 
 import pytest
 
+from open_world_rpg.core import LOGGER_NAME
 from open_world_rpg.engine import EventBus
 from open_world_rpg.world import (
     InvalidWorldTimeOperationError,
@@ -30,6 +32,23 @@ from open_world_rpg.world import (
 
 WORLD_ID = WorldId(value=UUID("12345678-1234-5678-1234-567812345678"))
 CREATED_AT = datetime(2026, 7, 25, 10, 0, tzinfo=UTC)
+
+
+class RecordingHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def create_recording_logger() -> tuple[logging.Logger, RecordingHandler]:
+    logger = logging.Logger("test.world.runtime")
+    logger.setLevel(logging.DEBUG)
+    handler = RecordingHandler()
+    logger.addHandler(handler)
+    return logger, handler
 
 
 def create_model(
@@ -63,6 +82,7 @@ def test_runtime_validates_construction_and_exposes_initial_snapshot() -> None:
 
     assert runtime.model is model
     assert runtime.revision == 0
+    assert runtime.logger.name == LOGGER_NAME
     assert runtime.snapshot == WorldRuntimeSnapshot(
         revision=0,
         world=model.snapshot(),
@@ -73,6 +93,9 @@ def test_runtime_validates_construction_and_exposes_initial_snapshot() -> None:
 
     with pytest.raises(TypeError, match="event_bus must be an EventBus or None"):
         WorldRuntime(model=model, event_bus=cast(Any, object()))
+
+    with pytest.raises(TypeError, match=r"logger must be a logging\.Logger or None"):
+        WorldRuntime(model=model, logger=cast(Any, object()))
 
 
 def test_runtime_without_event_bus_supports_every_successful_operation() -> None:
@@ -257,3 +280,63 @@ def test_runtime_event_and_snapshot_payloads_are_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         time_event.revision = 2  # type: ignore[misc]
+
+
+def test_runtime_emits_every_success_diagnostic_after_mutation() -> None:
+    logger, handler = create_recording_logger()
+    runtime = WorldRuntime(model=create_model(), logger=logger)
+
+    runtime.reset_clock(instant=WorldInstant(tick=10))
+    runtime.initialise()
+    runtime.activate()
+    runtime.advance_tick()
+    runtime.pause()
+    runtime.resume()
+    runtime.close()
+
+    failed_runtime = WorldRuntime(model=create_model(), logger=logger)
+    failed_runtime.fail()
+
+    assert [record.event for record in handler.records] == [
+        "world.clock_reset",
+        "world.initialised",
+        "world.activated",
+        "world.time_advanced",
+        "world.paused",
+        "world.resumed",
+        "world.closed",
+        "world.failed",
+    ]
+    time_record = handler.records[3]
+    assert time_record.world_id == str(WORLD_ID)
+    assert time_record.world_name == "Runtime World"
+    assert time_record.world_state == "active"
+    assert time_record.previous_world_state == "active"
+    assert time_record.world_revision == 4
+    assert time_record.previous_world_tick == 10
+    assert time_record.world_tick == 11
+    assert time_record.advanced_world_ticks == 1
+    assert time_record.world_year == 1
+    assert time_record.world_day_of_year == 1
+    assert time_record.world_hour == 0
+    assert time_record.world_minute == 0
+    assert time_record.world_second == 0
+    assert time_record.world_tick_within_second == 11
+    assert time_record.world_seed == 42
+    assert time_record.world_tick_rate == 60
+
+
+def test_failed_and_no_op_operations_emit_no_success_diagnostic() -> None:
+    logger, handler = create_recording_logger()
+    active = WorldRuntime(
+        model=create_model(state=WorldState.ACTIVE, tick=10),
+        logger=logger,
+    )
+    created = WorldRuntime(model=create_model(tick=10), logger=logger)
+
+    active.advance_ticks(0)
+    created.reset_clock(instant=WorldInstant(tick=10))
+    with pytest.raises(WorldTransitionError):
+        created.activate()
+
+    assert handler.records == []

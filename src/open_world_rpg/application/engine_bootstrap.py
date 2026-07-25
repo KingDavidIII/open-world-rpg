@@ -134,17 +134,23 @@ def create_world_runtime(
     application: GameApplication,
     name: str | None = None,
     event_bus: EventBus | None = None,
+    logger: logging.Logger | None = None,
 ) -> WorldRuntime:
     """Create a controlled world runtime from an application."""
     if event_bus is not None and not isinstance(event_bus, EventBus):
         raise TypeError("event_bus must be an EventBus or None.")
 
+    if logger is not None and not isinstance(logger, logging.Logger):
+        raise TypeError("logger must be a logging.Logger or None.")
+
+    model = create_world_model(
+        application=application,
+        name=name,
+    )
     return WorldRuntime(
-        model=create_world_model(
-            application=application,
-            name=name,
-        ),
+        model=model,
         event_bus=event_bus,
+        logger=application.logger if logger is None else logger,
     )
 
 
@@ -159,17 +165,22 @@ def create_world_engine_runtime(
     service_registrations: Iterable[EngineServiceRegistration] = (),
 ) -> EngineRuntime:
     """Create an engine with a wired world runtime and world subsystem."""
+    if not isinstance(application, GameApplication):
+        raise TypeError("application must be a GameApplication.")
+
     resolved_event_bus = EventBus() if event_bus is None else event_bus
+    resolved_logger = application.logger if logger is None else logger
     world_runtime = create_world_runtime(
         application=application,
         name=name,
         event_bus=resolved_event_bus,
+        logger=resolved_logger,
     )
     return create_engine_runtime(
         application=application,
         subsystems=(WorldSubsystem(), *tuple(subsystems)),
         clock=clock,
-        logger=logger,
+        logger=resolved_logger,
         event_bus=resolved_event_bus,
         service_registrations=(
             EngineServiceRegistration(WorldRuntime, world_runtime),

@@ -343,3 +343,84 @@ def test_json_formatter_includes_engine_context() -> None:
     assert payload["cumulative_dropped_update_count"] == 22
     assert payload["stop_reason"] == "frame_limit"
     assert payload["cleanup_failed"] is True
+
+
+def test_json_formatter_includes_canonical_world_context_in_stable_order() -> None:
+    formatter = JsonLogFormatter()
+    record = logging.LogRecord(
+        name=LOGGER_NAME,
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=60,
+        msg="World advanced",
+        args=(),
+        exc_info=None,
+    )
+    record.created = 0
+    record.event = "world.time_advanced"
+    record.world_id = "1234"
+    record.world_name = "Test World"
+    record.world_state = "active"
+    record.previous_world_state = "active"
+    record.world_revision = 5
+    record.world_tick = 3
+    record.previous_world_tick = 2
+    record.advanced_world_ticks = 1
+    record.world_year = 1
+    record.world_day_of_year = 1
+    record.world_hour = 0
+    record.world_minute = 0
+    record.world_second = 0
+    record.world_tick_within_second = 3
+    record.world_seed = 42
+    record.world_tick_rate = 60
+
+    formatted = formatter.format(record)
+    payload = json.loads(formatted)
+
+    assert list(payload) == sorted(payload)
+    assert payload == {
+        "advanced_world_ticks": 1,
+        "event": "world.time_advanced",
+        "level": "INFO",
+        "logger": LOGGER_NAME,
+        "message": "World advanced",
+        "previous_world_state": "active",
+        "previous_world_tick": 2,
+        "timestamp": "1970-01-01T00:00:00+00:00",
+        "world_day_of_year": 1,
+        "world_hour": 0,
+        "world_id": "1234",
+        "world_minute": 0,
+        "world_name": "Test World",
+        "world_revision": 5,
+        "world_second": 0,
+        "world_seed": 42,
+        "world_state": "active",
+        "world_tick": 3,
+        "world_tick_rate": 60,
+        "world_tick_within_second": 3,
+        "world_year": 1,
+    }
+
+
+def test_json_formatter_omits_unavailable_world_context() -> None:
+    formatter = JsonLogFormatter()
+    record = logging.LogRecord(
+        name=LOGGER_NAME,
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=70,
+        msg="World available",
+        args=(),
+        exc_info=None,
+    )
+    record.world_id = "1234"
+    record.world_tick = None
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload["world_id"] == "1234"
+    assert "world_tick" not in payload
+    assert "world_state" not in payload
+    assert "advanced_world_ticks" not in payload

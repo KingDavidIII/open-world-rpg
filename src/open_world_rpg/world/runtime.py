@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from open_world_rpg.core.diagnostics import LOGGER_NAME
 from open_world_rpg.engine.events import EventBus
 from open_world_rpg.world.metadata import WorldId, WorldState
 from open_world_rpg.world.model import WorldModel, WorldSnapshot
@@ -46,13 +48,14 @@ _ModelOperation = Callable[[WorldModel], WorldModel]
 class WorldRuntime:
     """Own and replace the current immutable world model."""
 
-    __slots__ = ("_event_bus", "_model", "_revision")
+    __slots__ = ("_event_bus", "_logger", "_model", "_revision")
 
     def __init__(
         self,
         *,
         model: WorldModel,
         event_bus: EventBus | None = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         if not isinstance(model, WorldModel):
             raise TypeError("model must be a WorldModel.")
@@ -60,8 +63,12 @@ class WorldRuntime:
         if event_bus is not None and not isinstance(event_bus, EventBus):
             raise TypeError("event_bus must be an EventBus or None.")
 
+        if logger is not None and not isinstance(logger, logging.Logger):
+            raise TypeError("logger must be a logging.Logger or None.")
+
         self._model = model
         self._event_bus = event_bus
+        self._logger = logging.getLogger(LOGGER_NAME) if logger is None else logger
         self._revision = 0
 
     @property
@@ -75,6 +82,11 @@ class WorldRuntime:
         return self._revision
 
     @property
+    def logger(self) -> logging.Logger:
+        """Return the logger used for structured world diagnostics."""
+        return self._logger
+
+    @property
     def snapshot(self) -> WorldRuntimeSnapshot:
         """Return an immutable snapshot of revision and world state."""
         return WorldRuntimeSnapshot(
@@ -84,27 +96,52 @@ class WorldRuntime:
 
     def initialise(self) -> None:
         """Initialise the current world."""
-        self._apply_state_transition(WorldModel.initialise)
+        self._apply_state_transition(
+            WorldModel.initialise,
+            event="world.initialised",
+            message="World initialised.",
+        )
 
     def activate(self) -> None:
         """Activate the current world."""
-        self._apply_state_transition(WorldModel.activate)
+        self._apply_state_transition(
+            WorldModel.activate,
+            event="world.activated",
+            message="World activated.",
+        )
 
     def pause(self) -> None:
         """Pause the current world."""
-        self._apply_state_transition(WorldModel.pause)
+        self._apply_state_transition(
+            WorldModel.pause,
+            event="world.paused",
+            message="World paused.",
+        )
 
     def resume(self) -> None:
         """Resume the current world."""
-        self._apply_state_transition(WorldModel.resume)
+        self._apply_state_transition(
+            WorldModel.resume,
+            event="world.resumed",
+            message="World resumed.",
+        )
 
     def close(self) -> None:
         """Close the current world."""
-        self._apply_state_transition(WorldModel.close)
+        self._apply_state_transition(
+            WorldModel.close,
+            event="world.closed",
+            message="World closed.",
+        )
 
     def fail(self) -> None:
         """Fail the current world."""
-        self._apply_state_transition(WorldModel.fail)
+        self._apply_state_transition(
+            WorldModel.fail,
+            event="world.failed",
+            message="World failed.",
+            level=logging.ERROR,
+        )
 
     def advance_tick(self) -> None:
         """Advance the active world by exactly one tick."""
@@ -134,6 +171,14 @@ class WorldRuntime:
                 revision=self._revision,
             )
         )
+        self._log(
+            level=logging.DEBUG,
+            event="world.time_advanced",
+            message="World time advanced.",
+            previous_model=previous,
+            previous_tick=previous.clock.current.tick,
+            advanced_ticks=ticks,
+        )
 
     def reset_clock(
         self,
@@ -148,8 +193,22 @@ class WorldRuntime:
 
         self._model = candidate
         self._revision += 1
+        self._log(
+            level=logging.INFO,
+            event="world.clock_reset",
+            message="World clock reset.",
+            previous_model=previous,
+            previous_tick=previous.clock.current.tick,
+        )
 
-    def _apply_state_transition(self, operation: _ModelOperation) -> None:
+    def _apply_state_transition(
+        self,
+        operation: _ModelOperation,
+        *,
+        event: str,
+        message: str,
+        level: int = logging.INFO,
+    ) -> None:
         previous = self._model
         candidate = operation(previous)
         self._model = candidate
@@ -162,7 +221,49 @@ class WorldRuntime:
                 revision=self._revision,
             )
         )
+        self._log(
+            level=level,
+            event=event,
+            message=message,
+            previous_model=previous,
+        )
 
     def _publish(self, event: object) -> None:
         if self._event_bus is not None:
             self._event_bus.publish(event)
+
+    def _log(
+        self,
+        *,
+        level: int,
+        event: str,
+        message: str,
+        previous_model: WorldModel,
+        previous_tick: int | None = None,
+        advanced_ticks: int | None = None,
+    ) -> None:
+        snapshot = self._model.snapshot()
+        date_time = snapshot.date_time
+        context: dict[str, object] = {
+            "event": event,
+            "world_id": str(snapshot.world_id),
+            "world_name": snapshot.name,
+            "world_state": snapshot.state.value,
+            "previous_world_state": previous_model.metadata.state.value,
+            "world_revision": self._revision,
+            "world_tick": snapshot.absolute_world_tick,
+            "world_year": date_time.year,
+            "world_day_of_year": date_time.day_of_year,
+            "world_hour": date_time.hour,
+            "world_minute": date_time.minute,
+            "world_second": date_time.second,
+            "world_tick_within_second": date_time.tick_within_second,
+            "world_seed": snapshot.seed.value,
+            "world_tick_rate": self._model.specification.time_config.ticks_per_second,
+        }
+        if previous_tick is not None:
+            context["previous_world_tick"] = previous_tick
+        if advanced_ticks is not None:
+            context["advanced_world_ticks"] = advanced_ticks
+
+        self._logger.log(level, message, extra=context)

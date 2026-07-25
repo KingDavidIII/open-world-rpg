@@ -110,6 +110,43 @@ def test_create_world_runtime_uses_optional_event_bus(tmp_path: Path) -> None:
     assert event_bus.pending_event_count == 1
 
 
+def test_world_helpers_propagate_application_or_explicit_logger(
+    tmp_path: Path,
+) -> None:
+    application = create_application(tmp_path)
+    explicit_logger = logging.Logger("test.world.explicit")
+
+    default_runtime = create_world_runtime(application=application)
+    explicit_runtime = create_world_runtime(
+        application=application,
+        logger=explicit_logger,
+    )
+    engine = create_world_engine_runtime(
+        application=application,
+        logger=explicit_logger,
+    )
+
+    assert default_runtime.logger is application.logger
+    assert explicit_runtime.logger is explicit_logger
+    assert engine.logger is explicit_logger
+    assert engine.context.resolve(WorldRuntime).logger is explicit_logger
+
+
+def test_world_helpers_reject_invalid_logger_and_engine_application(
+    tmp_path: Path,
+) -> None:
+    application = create_application(tmp_path)
+
+    with pytest.raises(TypeError, match=r"logger must be a logging\.Logger or None"):
+        create_world_runtime(
+            application=application,
+            logger=cast(Any, object()),
+        )
+
+    with pytest.raises(TypeError, match="application must be a GameApplication"):
+        create_world_engine_runtime(application=cast(Any, object()))
+
+
 def test_create_world_engine_runtime_wires_service_and_subsystem(
     tmp_path: Path,
 ) -> None:
