@@ -7,6 +7,16 @@ from open_world_rpg.engine.dependencies import (
     SubsystemDependencyError,
     resolve_subsystem_order,
 )
+from open_world_rpg.engine.events import (
+    EventBus,
+    EventBusError,
+    EventDispatchError,
+    EventDispatchFailure,
+    EventDispatchReport,
+    EventDispatchStateError,
+    EventSubscription,
+    EventSubscriptionError,
+)
 from open_world_rpg.engine.runtime import (
     EngineRuntime,
     EngineRuntimeError,
@@ -51,6 +61,14 @@ __all__ = [
     "EngineSubsystem",
     "EngineSubsystemBase",
     "EngineTimingError",
+    "EventBus",
+    "EventBusError",
+    "EventDispatchError",
+    "EventDispatchFailure",
+    "EventDispatchReport",
+    "EventDispatchStateError",
+    "EventSubscription",
+    "EventSubscriptionError",
     "FixedStepConfig",
     "FixedStepScheduler",
     "FrameSchedule",
