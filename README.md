@@ -8,28 +8,38 @@ gameplay systems, and persistent save support.
 
 ## Current milestone
 
-**v0.5.0 - Procedural Terrain Foundation**
+**v0.6.0 - Player Interaction Foundation**
 
-The procedural terrain foundation includes:
+The player interaction foundation includes:
 
-- Immutable terrain elevation, tile and chunk payload contracts
-- Deterministic terrain configuration and classification
-- Fixed-point BLAKE2b terrain sampling
-- Deterministic complete chunk generation
-- Terrain repository and generation service
-- Controlled TerrainRuntime lifecycle and events
-- Terrain diagnostics and end-to-end acceptance coverage
-- Retained top-down terrain debug map
-- First-person ModernGL voxel prototype
-- Chunk streaming and GPU mesh caching
-- Hidden-face and chunk-boundary culling
-- Procedural pixel-art texture atlas
-- Grass, dirt, stone, sand, snow and water strata
-- Deterministic trees, shrubs, rocks and grass details
-- First-person camera, collision, jumping and flying
-- Sky, fog, sun, water animation and in-window HUD
-- Adjustable render distance
-- 1,542 passing tests
+- Stable editable BlockMaterial domain
+- Absolute WorldBlockCoordinate model
+- Immutable BlockEdit records
+- Revisioned BlockEditStore overlay
+- Generated-terrain immutability
+- Unified editable voxel block resolver
+- First-person block targeting
+- Left-click block breaking
+- Right-click block placement
+- Placement face-normal resolution
+- Player-body placement rejection
+- Interaction reach and cooldown policies
+- Nine-slot creative hotbar
+- Number-key and mouse-wheel selection
+- Immediate mesh invalidation after edits
+- Cross-chunk boundary invalidation
+- Collision against placed and removed blocks
+- Gravity after support removal
+- Persistent block edits in save documents
+- Backward-compatible legacy save loading
+- Atomic save and restore
+- World identity and seed validation
+- Dirty-state tracking
+- F7 save and F8 reload controls
+- Optional `--save-path`, `--load` and `--autosave` CLI options
+- Selective mesh reconciliation after loading
+- 1,580 passing tests
+- Zero skipped tests
 - 100% statement and branch coverage
 
 ## Requirements

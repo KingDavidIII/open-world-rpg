@@ -20,6 +20,6 @@ def test_main_bootstraps_application(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert captured.out == "Open World RPG v0.5.0 - runtime initialised.\n"
+    assert captured.out == "Open World RPG v0.6.0 - runtime initialised.\n"
     assert (tmp_path / "saves").is_dir()
     assert (tmp_path / "logs").is_dir()
