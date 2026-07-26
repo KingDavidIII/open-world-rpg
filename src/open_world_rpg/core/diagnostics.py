@@ -58,6 +58,23 @@ _CONTEXT_FIELDS: Final = (
     "event_handler_invocation_count",
     "event_dispatch_failure_count",
     "pending_event_count",
+    "chunk_x",
+    "chunk_y",
+    "region_x",
+    "region_y",
+    "chunk_state",
+    "previous_chunk_state",
+    "terrain_runtime_revision",
+    "terrain_repository_revision",
+    "terrain_seed",
+    "terrain_min_elevation",
+    "terrain_max_elevation",
+    "terrain_tile_count",
+    "terrain_cache_hits",
+    "terrain_cache_misses",
+    "terrain_successful_generations",
+    "terrain_failed_generations",
+    "terrain_evictions",
 )
 
 

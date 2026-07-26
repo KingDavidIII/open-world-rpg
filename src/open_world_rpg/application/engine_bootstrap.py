@@ -21,6 +21,9 @@ from open_world_rpg.engine import (
     resolve_subsystem_order,
 )
 from open_world_rpg.world import (
+    TerrainGenerationConfig,
+    TerrainGenerationService,
+    TerrainRuntime,
     WorldId,
     WorldModel,
     WorldRuntime,
@@ -152,6 +155,80 @@ def create_world_runtime(
         event_bus=event_bus,
         logger=application.logger if logger is None else logger,
     )
+
+
+def create_terrain_generation_service(
+    *,
+    world: WorldModel | WorldSpecification,
+    config: TerrainGenerationConfig | None = None,
+) -> TerrainGenerationService:
+    """Create a compatible terrain service from a world model or specification."""
+    specification = _world_specification(world)
+    resolved_config = TerrainGenerationConfig() if config is None else config
+    if not isinstance(resolved_config, TerrainGenerationConfig):
+        raise TypeError("config must be a TerrainGenerationConfig or None.")
+    return TerrainGenerationService(
+        specification=specification,
+        config=resolved_config,
+    )
+
+
+def create_terrain_runtime(
+    *,
+    world: WorldModel | WorldSpecification,
+    config: TerrainGenerationConfig | None = None,
+    service: TerrainGenerationService | None = None,
+    event_bus: EventBus | None = None,
+    logger: logging.Logger | None = None,
+) -> TerrainRuntime:
+    """Create a compatible terrain runtime without engine registration."""
+    specification = _world_specification(world)
+    if event_bus is not None and not isinstance(event_bus, EventBus):
+        raise TypeError("event_bus must be an EventBus or None.")
+    if logger is not None and not isinstance(logger, logging.Logger):
+        raise TypeError("logger must be a logging.Logger or None.")
+    resolved_service = (
+        create_terrain_generation_service(world=specification, config=config)
+        if service is None
+        else service
+    )
+    if not isinstance(resolved_service, TerrainGenerationService):
+        raise TypeError("service must be a TerrainGenerationService or None.")
+    return TerrainRuntime(
+        specification=specification,
+        service=resolved_service,
+        event_bus=event_bus,
+        logger=logger,
+    )
+
+
+def create_application_terrain_runtime(
+    *,
+    application: GameApplication,
+    world: WorldModel | WorldSpecification | None = None,
+    config: TerrainGenerationConfig | None = None,
+    event_bus: EventBus | None = None,
+) -> TerrainRuntime:
+    """Create terrain infrastructure using the application logger."""
+    if not isinstance(application, GameApplication):
+        raise TypeError("application must be a GameApplication.")
+    resolved_world = create_world_model(application=application) if world is None else world
+    return create_terrain_runtime(
+        world=resolved_world,
+        config=config,
+        event_bus=event_bus,
+        logger=application.logger,
+    )
+
+
+def _world_specification(
+    world: WorldModel | WorldSpecification,
+) -> WorldSpecification:
+    if isinstance(world, WorldModel):
+        return world.specification
+    if isinstance(world, WorldSpecification):
+        return world
+    raise TypeError("world must be a WorldModel or WorldSpecification.")
 
 
 def create_world_engine_runtime(

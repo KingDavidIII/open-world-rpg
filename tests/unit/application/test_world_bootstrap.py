@@ -14,6 +14,9 @@ from open_world_rpg.application import (
     GameApplication,
     GameMode,
     RuntimeContext,
+    create_application_terrain_runtime,
+    create_terrain_generation_service,
+    create_terrain_runtime,
     create_world_engine_runtime,
     create_world_model,
     create_world_runtime,
@@ -26,7 +29,13 @@ from open_world_rpg.core import (
 )
 from open_world_rpg.engine import EventBus
 from open_world_rpg.world import (
+    ChunkCoordinate,
+    TerrainGenerationConfig,
+    TerrainGenerationService,
+    TerrainRuntime,
     WorldRuntime,
+    WorldSeed,
+    WorldSpecification,
     WorldState,
 )
 
@@ -159,3 +168,96 @@ def test_create_world_engine_runtime_wires_service_and_subsystem(
     assert runtime.model.metadata.state is WorldState.CREATED
     assert runtime.model.specification.seed.value == 77
     assert engine.context.event_bus is engine.event_bus
+
+
+def test_terrain_helpers_accept_world_model_and_specification(
+    tmp_path: Path,
+) -> None:
+    application = create_application(tmp_path)
+    model = create_world_model(application=application)
+    config = TerrainGenerationConfig(octave_count=1)
+
+    model_service = create_terrain_generation_service(world=model, config=config)
+    specification_service = create_terrain_generation_service(
+        world=model.specification,
+        config=config,
+    )
+    runtime = create_terrain_runtime(
+        world=model,
+        config=config,
+        service=model_service,
+    )
+
+    assert isinstance(model_service, TerrainGenerationService)
+    assert model_service.specification is model.specification
+    assert specification_service.specification is model.specification
+    assert runtime.service is model_service
+    assert runtime.specification is model.specification
+
+
+def test_application_terrain_helper_propagates_logger_and_event_bus(
+    tmp_path: Path,
+) -> None:
+    application = create_application(tmp_path)
+    event_bus = EventBus()
+
+    runtime = create_application_terrain_runtime(
+        application=application,
+        event_bus=event_bus,
+        config=TerrainGenerationConfig(octave_count=1),
+    )
+    runtime.declare(ChunkCoordinate(x=0, y=0))
+
+    assert isinstance(runtime, TerrainRuntime)
+    assert runtime.logger is application.logger
+    assert event_bus.pending_event_count == 1
+
+
+@pytest.mark.parametrize(
+    ("function", "arguments", "message"),
+    [
+        (
+            create_terrain_generation_service,
+            {"world": object()},
+            "world must be",
+        ),
+        (
+            create_terrain_generation_service,
+            {"world": WorldSpecification(name="Test", seed=WorldSeed(value=1)), "config": object()},
+            "config must be",
+        ),
+        (
+            create_terrain_runtime,
+            {
+                "world": WorldSpecification(name="Test", seed=WorldSeed(value=1)),
+                "event_bus": object(),
+            },
+            "event_bus must be",
+        ),
+        (
+            create_terrain_runtime,
+            {"world": WorldSpecification(name="Test", seed=WorldSeed(value=1)), "logger": object()},
+            "logger must be",
+        ),
+        (
+            create_terrain_runtime,
+            {
+                "world": WorldSpecification(name="Test", seed=WorldSeed(value=1)),
+                "service": object(),
+            },
+            "service must be",
+        ),
+        (
+            create_application_terrain_runtime,
+            {"application": object()},
+            "application must be",
+        ),
+    ],
+)
+def test_terrain_helpers_validate_inputs(
+    function: object,
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        cast(Any, function)(**arguments)
