@@ -12,13 +12,14 @@ from uuid import UUID
 
 import pytest
 
-from open_world_rpg.application.save_service import GameSaveService
+from open_world_rpg.application.save_service import GameSaveService, ResourceStateRestoreError
 from open_world_rpg.application.session import (
     GameMode,
     RuntimeContext,
     SessionState,
 )
 from open_world_rpg.core import JsonLogFormatter, ProjectPaths
+from open_world_rpg.gameplay import DroppedItemManager, ItemType, create_bootstrap_inventory
 from open_world_rpg.persistence.document import (
     CURRENT_SAVE_SCHEMA_VERSION,
     SaveDocument,
@@ -88,6 +89,112 @@ def create_service(
 
 def read_payloads(stream: StringIO) -> list[dict[str, object]]:
     return [json.loads(line) for line in stream.getvalue().splitlines() if line]
+
+
+def test_gameplay_resources_round_trip_and_legacy_policy(tmp_path: Path) -> None:
+    service = create_service(tmp_path)
+    inventory = create_bootstrap_inventory()
+    inventory.select_hotbar(2)
+    drops = DroppedItemManager()
+    drops.spawn(item=ItemType.GRASS_BLOCK, quantity=1, position=(-1.5, 2.5, 3.5))
+    service.save(
+        slot=SaveSlot("resources"),
+        inventory=inventory.snapshot(),
+        dropped_items=drops.snapshot(),
+    )
+    document = service.load(SaveSlot("resources"))
+    restored_inventory, restored_drops = service.restore_resources(
+        document,
+        expected_world_id=SESSION_ID,
+        expected_world_seed=42,
+        legacy_inventory=create_bootstrap_inventory(enabled=False).snapshot(),
+    )
+    assert restored_inventory.snapshot() == inventory.snapshot()
+    assert restored_drops.snapshot() == drops.snapshot()
+
+    legacy = SaveDocument.from_runtime_context(context=service.context)
+    legacy_inventory, legacy_drops = service.restore_resources(
+        legacy,
+        expected_world_id=SESSION_ID,
+        expected_world_seed=42,
+        legacy_inventory=inventory.snapshot(),
+    )
+    assert legacy_inventory.snapshot() == inventory.snapshot()
+    assert len(legacy_drops) == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"inventory": []},
+        {"inventory": {"revision": 0, "selected_hotbar_index": 0, "slots": []}},
+        {
+            "dropped_items": {
+                "revision": 0,
+                "next_identifier": 1,
+                "items": [{"identifier": 1}],
+            }
+        },
+    ],
+)
+def test_malformed_gameplay_resources_fail_atomically(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    service = create_service(tmp_path)
+    document = SaveDocument.from_runtime_context(
+        context=service.context,
+        payload=cast(Any, payload),
+    )
+    with pytest.raises(ResourceStateRestoreError):
+        service.restore_resources(
+            document,
+            expected_world_id=SESSION_ID,
+            expected_world_seed=42,
+            legacy_inventory=create_bootstrap_inventory().snapshot(),
+        )
+
+
+def test_gameplay_resource_codec_validation_branches(tmp_path: Path) -> None:
+    service = create_service(tmp_path)
+    with pytest.raises(TypeError):
+        service._inventory_payload("bad")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        service._drops_payload("bad")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        service.restore_resources(
+            SaveDocument.from_runtime_context(context=service.context),
+            expected_world_id=SESSION_ID,
+            expected_world_seed=42,
+            legacy_inventory="bad",  # type: ignore[arg-type]
+        )
+    invalid_values: tuple[object, ...] = (
+        {"revision": 0, "selected_hotbar_index": 0, "slots": "bad"},
+        {"revision": 0, "selected_hotbar_index": 0, "slots": ["bad"]},
+    )
+    for value in invalid_values:
+        with pytest.raises((TypeError, ValueError)):
+            service._parse_inventory(cast(Any, value))
+    with pytest.raises(ValueError):
+        service._parse_drops(cast(Any, []))
+    with pytest.raises(TypeError):
+        service._parse_drops(cast(Any, {"revision": 0, "next_identifier": 1, "items": "bad"}))
+    complete = {
+        "identifier": 1,
+        "item": "stone_block",
+        "quantity": 1,
+        "position": "bad",
+        "velocity": [0, 0, 0],
+        "age": 0,
+        "pickup_delay": 0.3,
+        "settled": False,
+    }
+    with pytest.raises(TypeError):
+        service._parse_drops(
+            cast(
+                Any,
+                {"revision": 0, "next_identifier": 2, "items": [complete]},
+            )
+        )
 
 
 def create_document() -> SaveDocument:

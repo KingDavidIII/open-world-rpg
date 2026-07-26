@@ -19,6 +19,12 @@ import pygame
 from open_world_rpg.application import GameMode, RuntimeContext, create_terrain_runtime
 from open_world_rpg.application.save_service import GameSaveService
 from open_world_rpg.core import ProjectPaths
+from open_world_rpg.gameplay import (
+    DroppedItemManager,
+    ItemType,
+    create_bootstrap_inventory,
+    material_for_item,
+)
 from open_world_rpg.persistence import RuntimeStorage, SaveRepository, SaveSlot
 from open_world_rpg.world import (
     CHUNK_SIZE,
@@ -53,6 +59,7 @@ from .interaction import (
     VoxelInteractionController,
     invalidated_chunks_for_edit,
 )
+from .item_rendering import build_dropped_item_vertices
 from .meshing import VoxelChunkMesh, build_chunk_mesh, mesh_cache_key
 from .scenery import scenery_at
 from .shaders import (
@@ -102,6 +109,7 @@ class VoxelPrototypeConfig:
     save_path: Path | None = None
     load_on_start: bool = False
     autosave: bool = False
+    bootstrap_inventory: bool = True
     terrain_config: TerrainGenerationConfig = field(
         default_factory=lambda: TerrainGenerationConfig(octave_count=2)
     )
@@ -126,6 +134,8 @@ class VoxelPrototypeConfig:
             raise TypeError("load_on_start must be a boolean.")
         if not isinstance(self.autosave, bool):
             raise TypeError("autosave must be a boolean.")
+        if not isinstance(self.bootstrap_inventory, bool):
+            raise TypeError("bootstrap_inventory must be a boolean.")
         if (self.load_on_start or self.autosave) and self.save_path is None:
             raise ValueError("load and autosave require a save_path.")
 
@@ -276,8 +286,11 @@ class VoxelPrototypeApplication:
             break_cooldown=self.config.break_cooldown,
             placement_cooldown=self.config.placement_cooldown,
         )
-        self.hotbar = VoxelHotbar()
+        self.inventory = create_bootstrap_inventory(enabled=self.config.bootstrap_inventory)
+        self.dropped_items = DroppedItemManager()
         self.last_interaction = InteractionResult.NONE
+        self.last_pickup = "none"
+        self.last_placement_consumption = "none"
         self.save_message = ""
         self.dirty = False
         self._selection_changed_at = float("-inf")
@@ -307,6 +320,11 @@ class VoxelPrototypeApplication:
         self._hud_buffer: moderngl.Buffer | None = None
         self._hud_array: moderngl.VertexArray | None = None
         self._hud_texture: moderngl.Texture | None = None
+        self._drop_buffer: moderngl.Buffer | None = None
+        self._drop_array: moderngl.VertexArray | None = None
+        self._drop_render_revision = -1
+        self._drop_buffer_size = 0
+        self._drop_render_key: tuple[object, ...] | None = None
         self._font: pygame.font.Font | None = None
         self.hud_snapshot: VoxelHudSnapshot | None = None
         self._crosshair_buffer: moderngl.Buffer | None = None
@@ -319,6 +337,17 @@ class VoxelPrototypeApplication:
         self._stream_signature: tuple[int, int, int] | None = None
         self._generation_seconds = 0.0
         self._mesh_seconds = 0.0
+
+    @property
+    def hotbar(self) -> VoxelHotbar:
+        """Compatibility projection over the authoritative inventory hotbar."""
+        return VoxelHotbar(
+            slots=tuple(
+                None if stack is None else material_for_item(stack.item)
+                for stack in self.inventory.slots()[:9]
+            ),
+            selected_index=self.inventory.selected_hotbar_index,
+        )
 
     def initialise(self) -> None:
         """Create a core OpenGL context and safely spawn above generated terrain."""
@@ -539,18 +568,22 @@ class VoxelPrototypeApplication:
                     self._save_edits()
                 elif event.key == pygame.K_F8:
                     self._load_edits()
-                elif pygame.K_1 <= event.key <= pygame.K_9:
-                    self.hotbar = self.hotbar.select(event.key - pygame.K_1 + 1)
+                elif pygame.K_1 <= event.key <= pygame.K_9 and self.inventory.select_hotbar(
+                    event.key - pygame.K_1
+                ):
+                    self.dirty = True
                     self._selection_changed_at = pygame.time.get_ticks() / 1000.0
             elif event.type == pygame.MOUSEWHEEL:
-                self.hotbar = self.hotbar.cycle(event.y)
-                self._selection_changed_at = pygame.time.get_ticks() / 1000.0
+                if self.inventory.cycle_hotbar(event.y):
+                    self.dirty = True
+                    self._selection_changed_at = pygame.time.get_ticks() / 1000.0
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if not self.mouse_captured:
                     self._capture_mouse(True)
                 elif event.button in (4, 5):
-                    self.hotbar = self.hotbar.cycle(1 if event.button == 4 else -1)
-                    self._selection_changed_at = pygame.time.get_ticks() / 1000.0
+                    if self.inventory.cycle_hotbar(1 if event.button == 4 else -1):
+                        self.dirty = True
+                        self._selection_changed_at = pygame.time.get_ticks() / 1000.0
                 elif event.button == 1:
                     self._apply_interaction(
                         self.interactions.break_block(
@@ -560,9 +593,9 @@ class VoxelPrototypeApplication:
                     )
                 elif event.button == 3:
                     self._apply_interaction(
-                        self.interactions.place_block(
+                        self.interactions.place_inventory_block(
                             target=self.target,
-                            material=self.hotbar.selected_material,
+                            inventory=self.inventory,
                             player=self.player,
                             now=pygame.time.get_ticks() / 1000.0,
                         )
@@ -598,6 +631,19 @@ class VoxelPrototypeApplication:
                 z=self.player.z,
                 flying=True,
             )
+        if self.dropped_items.update(delta_seconds, solid_at=self._solid_at):
+            self.dirty = True
+        pickups = self.dropped_items.pickup_near(
+            position=(self.player.x, self.player.y + 0.9, self.player.z),
+            inventory=self.inventory,
+        )
+        if pickups:
+            self.dirty = True
+            pickup = pickups[-1]
+            item = cast(ItemType, pickup.item)
+            self.save_message = f"Picked up {item.display_name} x{pickup.accepted}"
+            self.last_pickup = self.save_message
+            self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
         self._stream()
         self.target = ray_cast(
             origin=(self.player.x, self.player.y + 1.62, self.player.z),
@@ -645,6 +691,12 @@ class VoxelPrototypeApplication:
             gpu = self._gpu_chunks[coordinate]
             gpu.opaque_array.render(moderngl.TRIANGLES)
             triangles += gpu.mesh.triangle_count
+        self._refresh_drop_gpu()
+        if self._drop_array is not None:
+            self.context.disable(moderngl.CULL_FACE)
+            self._drop_array.render(moderngl.TRIANGLES)
+            self.context.enable(moderngl.CULL_FACE)
+            triangles += len(self.dropped_items) * 4
         cast(Any, self.context).depth_mask = False
         for coordinate in _water_render_order(
             self._visible,
@@ -688,6 +740,8 @@ class VoxelPrototypeApplication:
                 )
         self._gpu_chunks.clear()
         for resource in (
+            self._drop_array,
+            self._drop_buffer,
             self._target_array,
             self._target_buffer,
             self._crosshair_array,
@@ -725,6 +779,10 @@ class VoxelPrototypeApplication:
         self._hud_buffer = None
         self._hud_texture = None
         self._hud_program = None
+        self._drop_array = None
+        self._drop_buffer = None
+        self._drop_buffer_size = 0
+        self._drop_render_key = None
         self._font = None
         self.program = None
         try:
@@ -746,6 +804,59 @@ class VoxelPrototypeApplication:
                     )
             self.context = None
             pygame.quit()
+
+    def _refresh_drop_gpu(self) -> None:
+        """Refresh the single drop batch only when authoritative state changes."""
+        if self.context is None or self.program is None:
+            return
+        if self._drop_render_revision == self.dropped_items.revision:
+            return
+        items = self.dropped_items.items()
+        render_key = tuple(
+            (
+                item.identifier,
+                item.item,
+                item.quantity,
+                item.position,
+                item.velocity,
+                item.settled,
+                math.floor(item.age * 10) if item.settled else item.age,
+            )
+            for item in items
+        )
+        if render_key == self._drop_render_key:
+            self._drop_render_revision = self.dropped_items.revision
+            return
+        vertices = build_dropped_item_vertices(items)
+        if vertices and self._drop_buffer is not None and len(vertices) == self._drop_buffer_size:
+            self._drop_buffer.write(vertices)
+            self._drop_render_revision = self.dropped_items.revision
+            self._drop_render_key = render_key
+            return
+        if self._drop_array is not None:
+            self._drop_array.release()
+        if self._drop_buffer is not None:
+            self._drop_buffer.release()
+        self._drop_array = None
+        self._drop_buffer = None
+        self._drop_buffer_size = 0
+        if vertices:
+            self._drop_buffer = self.context.buffer(vertices)
+            self._drop_buffer_size = len(vertices)
+            self._drop_array = self.context.vertex_array(
+                self.program,
+                [
+                    (
+                        self._drop_buffer,
+                        "3f 2f 1f",
+                        "in_position",
+                        "in_uv",
+                        "in_shade",
+                    )
+                ],
+            )
+        self._drop_render_revision = self.dropped_items.revision
+        self._drop_render_key = render_key
 
     def _stream(self) -> None:
         signature = (
@@ -847,11 +958,27 @@ class VoxelPrototypeApplication:
 
     def _apply_interaction(self, outcome: InteractionOutcome) -> None:
         self.last_interaction = outcome.result
+        if outcome.result is InteractionResult.PLACED:
+            self.last_placement_consumption = "consumed 1 selected item"
         self.save_message = ""
         if not outcome.changed:
             if outcome.result is InteractionResult.PLAYER_INTERSECTION:
                 self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
             return
+        if (
+            outcome.result is InteractionResult.BROKEN
+            and outcome.coordinate is not None
+            and outcome.dropped_item is not None
+        ):
+            self.dropped_items.spawn(
+                item=outcome.dropped_item,
+                quantity=1,
+                position=(
+                    outcome.coordinate.x + 0.5,
+                    outcome.coordinate.y + 0.5,
+                    outcome.coordinate.z + 0.5,
+                ),
+            )
         self._feedback_coordinate = outcome.coordinate
         self._feedback_until = pygame.time.get_ticks() / 1000.0 + 0.22
         self.dirty = True
@@ -877,6 +1004,8 @@ class VoxelPrototypeApplication:
             self._save_service.save(
                 slot=self._save_slot,
                 block_edits=self.edits.snapshot(),
+                inventory=self.inventory.snapshot(),
+                dropped_items=self.dropped_items.snapshot(),
             )
         except Exception:
             self.save_message = "Save failed"
@@ -899,6 +1028,14 @@ class VoxelPrototypeApplication:
                 expected_world_id=self.world_id,
                 expected_world_seed=self.config.world_seed,
             )
+            restored_inventory, restored_drops = self._save_service.restore_resources(
+                document,
+                expected_world_id=self.world_id,
+                expected_world_seed=self.config.world_seed,
+                legacy_inventory=create_bootstrap_inventory(
+                    enabled=self.config.bootstrap_inventory
+                ).snapshot(),
+            )
         except Exception:
             self.save_message = "Load failed"
             self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
@@ -911,6 +1048,9 @@ class VoxelPrototypeApplication:
             if previous.get(coordinate) is not replacement.get(coordinate)
         }
         self.edits = restored
+        self.inventory = restored_inventory
+        self.dropped_items = restored_drops
+        self._drop_render_revision = -1
         self.editable_world = EditableVoxelWorld(
             column_at=self._column_at,
             edits=self.edits,
@@ -1092,12 +1232,35 @@ class VoxelPrototypeApplication:
             render_distance=self.render_distance,
             target=self.target,
             loading=self.loading,
-            selected_material=self.hotbar.selected_material,
+            selected_material=(
+                None
+                if self.inventory.selected_stack is None
+                else material_for_item(self.inventory.selected_stack.item)
+            ),
             edit_revision=self.edits.revision,
             edited_block_count=len(self.edits),
             last_interaction=self.last_interaction.value,
             save_path=None if self.save_path is None else str(self.save_path),
             dirty=self.dirty,
+            selected_item=(
+                None
+                if self.inventory.selected_stack is None
+                else self.inventory.selected_stack.item.value
+            ),
+            selected_quantity=(
+                0
+                if self.inventory.selected_stack is None
+                else self.inventory.selected_stack.quantity
+            ),
+            inventory_revision=self.inventory.revision,
+            occupied_slots=self.inventory.occupied_slots,
+            total_inventory_items=self.inventory.total_items,
+            active_dropped_items=len(self.dropped_items),
+            nearest_drop_distance=self.dropped_items.nearest_distance(
+                (self.player.x, self.player.y + 0.9, self.player.z)
+            ),
+            last_pickup=self.last_pickup,
+            last_placement_consumption=self.last_placement_consumption,
         )
         hud = self.hud_snapshot
         lines = [f"{hud.fps:4.0f} FPS"]
@@ -1118,6 +1281,13 @@ class VoxelPrototypeApplication:
                     f"face {hud.target_face or 'none'}",
                     f"Edits {hud.edited_block_count}  Revision {hud.edit_revision}",
                     f"Interaction {hud.last_interaction}",
+                    f"Inventory {hud.total_inventory_items} items / {hud.occupied_slots} slots "
+                    f"(rev {hud.inventory_revision})",
+                    f"Drops {hud.active_dropped_items}  nearest {hud.nearest_drop_distance:.2f}"
+                    if hud.nearest_drop_distance is not None
+                    else f"Drops {hud.active_dropped_items}  nearest none",
+                    f"Pickup {hud.last_pickup}",
+                    f"Placement {hud.last_placement_consumption}",
                     f"Save {hud.save_path or 'disabled'} ({'modified' if hud.dirty else 'clean'})",
                 )
             )
@@ -1153,12 +1323,12 @@ class VoxelPrototypeApplication:
         }
         slot_size = 46
         gap = 4
-        total_width = len(self.hotbar.slots) * slot_size + (len(self.hotbar.slots) - 1) * gap
+        total_width = 9 * slot_size + 8 * gap
         start_x = (surface.get_width() - total_width) // 2
         y = surface.get_height() - slot_size - 18
-        for index, material in enumerate(self.hotbar.slots):
+        for index, stack in enumerate(self.inventory.slots()[:9]):
             rect = pygame.Rect(start_x + index * (slot_size + gap), y, slot_size, slot_size)
-            is_selected = index == self.hotbar.selected_index
+            is_selected = index == self.inventory.selected_hotbar_index
             pygame.draw.rect(
                 surface,
                 (232, 204, 92, 235) if is_selected else (24, 29, 34, 215),
@@ -1170,7 +1340,8 @@ class VoxelPrototypeApplication:
                 rect,
                 3,
             )
-            if material is not None:
+            if stack is not None:
+                material = material_for_item(stack.item)
                 texture = icon_for[material]
                 atlas_index = tuple(FaceTexture).index(texture)
                 source = pygame.Rect(
@@ -1181,12 +1352,17 @@ class VoxelPrototypeApplication:
                 )
                 icon = pygame.transform.scale(atlas.subsurface(source), (34, 34))
                 surface.blit(icon, (rect.x + 6, rect.y + 6))
+                quantity = font.render(str(stack.quantity), True, (255, 255, 255))
+                surface.blit(
+                    quantity,
+                    (rect.right - quantity.get_width() - 3, rect.bottom - quantity.get_height()),
+                )
             number = font.render(str(index + 1), True, (245, 245, 245))
             surface.blit(number, (rect.x + 3, rect.y + 1))
         now = pygame.time.get_ticks() / 1000.0
-        selected_material = self.hotbar.selected_material
-        if selected_material is not None and now - self._selection_changed_at < 1.4:
-            label = font.render(selected_material.value.upper(), True, (255, 245, 190))
+        selected_stack = self.inventory.selected_stack
+        if selected_stack is not None and now - self._selection_changed_at < 1.4:
+            label = font.render(selected_stack.item.display_name, True, (255, 245, 190))
             surface.blit(label, (surface.get_width() // 2 - label.get_width() // 2, y - 24))
         if now < self._feedback_until:
             message = self.save_message or self.last_interaction.value

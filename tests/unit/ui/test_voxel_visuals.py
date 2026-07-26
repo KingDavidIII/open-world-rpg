@@ -6,6 +6,7 @@ import struct
 
 import pytest
 
+from open_world_rpg.gameplay import DroppedItem, ItemType
 from open_world_rpg.ui.voxel import (
     BlockColumn,
     BlockType,
@@ -19,6 +20,7 @@ from open_world_rpg.ui.voxel import (
     scenery_at,
     select_spawn,
 )
+from open_world_rpg.ui.voxel.item_rendering import build_dropped_item_vertices
 from open_world_rpg.ui.voxel.meshing import _material_texture, side_texture, top_texture
 from open_world_rpg.ui.voxel.texture_atlas import ATLAS_SIZE
 
@@ -42,6 +44,33 @@ def test_texture_atlas_is_complete_crisp_and_deterministic() -> None:
     assert _material_texture(BlockType.SNOW, top=False) is FaceTexture.SNOW_SIDE
     with pytest.raises(TypeError):
         atlas_uv("grass")  # type: ignore[arg-type]
+
+
+def test_dropped_item_geometry_is_one_deterministic_atlas_batch() -> None:
+    items = (
+        DroppedItem(
+            identifier=1,
+            item=ItemType.STONE_BLOCK,
+            quantity=1,
+            position=(-1.5, 2.0, 3.5),
+            age=1,
+            settled=True,
+        ),
+        DroppedItem(
+            identifier=2,
+            item=ItemType.SNOW_BLOCK,
+            quantity=2,
+            position=(0.5, 4.0, 0.5),
+        ),
+    )
+    vertices = build_dropped_item_vertices(items)
+    assert len(vertices) == 2 * 12 * 6 * 4
+    assert vertices == build_dropped_item_vertices(items)
+    assert build_dropped_item_vertices(()) == b""
+    with pytest.raises(TypeError):
+        build_dropped_item_vertices([])  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        build_dropped_item_vertices(("bad",))  # type: ignore[arg-type]
 
 
 def test_side_strata_select_grass_dirt_stone_sand_and_snow() -> None:
