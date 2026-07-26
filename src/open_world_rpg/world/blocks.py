@@ -82,6 +82,25 @@ class BlockEditStoreSnapshot:
     revision: int
     edits: tuple[BlockEdit, ...]
 
+    def __post_init__(self) -> None:
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int):
+            raise TypeError("revision must be an integer.")
+        if self.revision < 0:
+            raise ValueError("revision must be non-negative.")
+        if not isinstance(self.edits, tuple):
+            raise TypeError("edits must be a tuple.")
+        coordinates: set[WorldBlockCoordinate] = set()
+        for edit in self.edits:
+            if not isinstance(edit, BlockEdit):
+                raise TypeError("edits must contain BlockEdit values.")
+            if edit.coordinate in coordinates:
+                raise ValueError("edits must not contain duplicate coordinates.")
+            if edit.revision > self.revision:
+                raise ValueError("edit revision cannot exceed store revision.")
+            coordinates.add(edit.coordinate)
+        if self.edits != tuple(sorted(self.edits, key=lambda item: item.coordinate)):
+            raise ValueError("edits must use deterministic coordinate ordering.")
+
 
 class BlockEditStore:
     """Controlled mutable overlay indexed by absolute and chunk coordinates."""
@@ -90,6 +109,18 @@ class BlockEditStore:
         self._revision = 0
         self._edits: dict[WorldBlockCoordinate, BlockEdit] = {}
         self._chunks: dict[ChunkCoordinate, set[WorldBlockCoordinate]] = {}
+
+    @classmethod
+    def from_snapshot(cls, snapshot: BlockEditStoreSnapshot) -> BlockEditStore:
+        """Atomically construct a store from a fully validated snapshot."""
+        if not isinstance(snapshot, BlockEditStoreSnapshot):
+            raise TypeError("snapshot must be a BlockEditStoreSnapshot.")
+        store = cls()
+        store._revision = snapshot.revision
+        store._edits = {edit.coordinate: edit for edit in snapshot.edits}
+        for coordinate in store._edits:
+            store._chunks.setdefault(coordinate.chunk_coordinate, set()).add(coordinate)
+        return store
 
     @property
     def revision(self) -> int:

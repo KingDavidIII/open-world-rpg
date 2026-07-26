@@ -6,11 +6,21 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from uuid import UUID
 
 from open_world_rpg.application.session import RuntimeContext
-from open_world_rpg.persistence.document import JsonValue, SaveDocument
+from open_world_rpg.persistence.document import (
+    JsonValue,
+    PersistedBlockEditOverlay,
+    SaveDocument,
+)
 from open_world_rpg.persistence.repository import SaveRepository
 from open_world_rpg.persistence.storage import SaveSlot
+from open_world_rpg.world import BlockEditStore, BlockEditStoreSnapshot
+
+
+class BlockEditRestoreError(RuntimeError):
+    """Raised when a save cannot be applied to the current voxel world."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +47,7 @@ class GameSaveService:
         slot: SaveSlot,
         payload: dict[str, JsonValue] | None = None,
         saved_at: datetime | None = None,
+        block_edits: BlockEditStoreSnapshot | None = None,
     ) -> Path:
         """Create and persist a document for the current session."""
         if not isinstance(slot, SaveSlot):
@@ -49,6 +60,11 @@ class GameSaveService:
                 context=self.context,
                 payload=payload,
                 saved_at=saved_at,
+                block_edits=(
+                    None
+                    if block_edits is None
+                    else PersistedBlockEditOverlay.from_snapshot(block_edits)
+                ),
             )
             path = self.repository.save(
                 slot=slot,
@@ -101,6 +117,31 @@ class GameSaveService:
             ),
         )
         return document
+
+    def restore_block_edits(
+        self,
+        document: SaveDocument,
+        *,
+        expected_world_id: UUID,
+        expected_world_seed: int,
+    ) -> BlockEditStore:
+        """Validate identity and atomically construct the saved edit overlay."""
+        if not isinstance(document, SaveDocument):
+            raise TypeError("document must be a SaveDocument.")
+        if not isinstance(expected_world_id, UUID):
+            raise TypeError("expected_world_id must be a UUID.")
+        if isinstance(expected_world_seed, bool) or not isinstance(expected_world_seed, int):
+            raise TypeError("expected_world_seed must be an integer.")
+        if document.session.session_id != expected_world_id:
+            raise BlockEditRestoreError("Saved world identity does not match the current world.")
+        if document.session.world_seed != expected_world_seed:
+            raise BlockEditRestoreError("Saved world seed does not match the current world.")
+        overlay = document.block_edits
+        return (
+            BlockEditStore()
+            if overlay is None
+            else BlockEditStore.from_snapshot(overlay.to_snapshot())
+        )
 
     def _diagnostic_context(
         self,

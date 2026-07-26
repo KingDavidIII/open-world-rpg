@@ -39,6 +39,8 @@ class VoxelHudSnapshot:
     edit_revision: int
     edited_block_count: int
     last_interaction: str
+    save_path: str | None
+    dirty: bool
     loading: bool
 
     @classmethod
@@ -59,6 +61,8 @@ class VoxelHudSnapshot:
         edit_revision: int = 0,
         edited_block_count: int = 0,
         last_interaction: str = "none",
+        save_path: str | None = None,
+        dirty: bool = False,
     ) -> VoxelHudSnapshot:
         block = (math.floor(player.x), math.floor(player.y), math.floor(player.z))
         chunk = ChunkCoordinate(
@@ -88,5 +92,7 @@ class VoxelHudSnapshot:
             edit_revision=edit_revision,
             edited_block_count=edited_block_count,
             last_interaction=last_interaction,
+            save_path=save_path,
+            dirty=dirty,
             loading=loading,
         )

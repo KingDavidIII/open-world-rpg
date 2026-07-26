@@ -9,13 +9,17 @@ import time
 from array import array
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
 import moderngl
 import pygame
 
-from open_world_rpg.application import create_terrain_runtime
+from open_world_rpg.application import GameMode, RuntimeContext, create_terrain_runtime
+from open_world_rpg.application.save_service import GameSaveService
+from open_world_rpg.core import ProjectPaths
+from open_world_rpg.persistence import RuntimeStorage, SaveRepository, SaveSlot
 from open_world_rpg.world import (
     CHUNK_SIZE,
     BlockEditStore,
@@ -33,11 +37,22 @@ from open_world_rpg.world import (
 
 from .blocks import BlockColumn, column_from_terrain
 from .camera import FirstPersonCamera, PlayerState
-from .collision import RayHit, move_player, ray_cast, safe_spawn_height
+from .collision import (
+    RayHit,
+    move_player,
+    player_intersects_block,
+    ray_cast,
+    safe_spawn_height,
+)
 from .editable_world import EditableVoxelWorld
 from .hotbar import VoxelHotbar
 from .hud import VoxelHudSnapshot
-from .interaction import InteractionOutcome, InteractionResult, VoxelInteractionController
+from .interaction import (
+    InteractionOutcome,
+    InteractionResult,
+    VoxelInteractionController,
+    invalidated_chunks_for_edit,
+)
 from .meshing import VoxelChunkMesh, build_chunk_mesh, mesh_cache_key
 from .scenery import scenery_at
 from .shaders import (
@@ -84,6 +99,9 @@ class VoxelPrototypeConfig:
     interaction_reach: float = 5.5
     break_cooldown: float = 0.18
     placement_cooldown: float = 0.18
+    save_path: Path | None = None
+    load_on_start: bool = False
+    autosave: bool = False
     terrain_config: TerrainGenerationConfig = field(
         default_factory=lambda: TerrainGenerationConfig(octave_count=2)
     )
@@ -102,6 +120,14 @@ class VoxelPrototypeConfig:
             raise ValueError("interaction_reach must be greater than zero.")
         if self.break_cooldown < 0 or self.placement_cooldown < 0:
             raise ValueError("interaction cooldowns must be non-negative.")
+        if self.save_path is not None and not isinstance(self.save_path, Path):
+            raise TypeError("save_path must be a pathlib.Path or None.")
+        if not isinstance(self.load_on_start, bool):
+            raise TypeError("load_on_start must be a boolean.")
+        if not isinstance(self.autosave, bool):
+            raise TypeError("autosave must be a boolean.")
+        if (self.load_on_start or self.autosave) and self.save_path is None:
+            raise ValueError("load and autosave require a save_path.")
 
 
 @dataclass(slots=True)
@@ -204,15 +230,44 @@ class VoxelPrototypeApplication:
 
     def __init__(self, *, config: VoxelPrototypeConfig | None = None) -> None:
         self.config = VoxelPrototypeConfig() if config is None else config
+        self.world_id = UUID(int=1)
         specification = WorldSpecification(
             name="Voxel Prototype", seed=WorldSeed(value=self.config.world_seed)
         )
         world = WorldModel.create(
             specification=specification,
             created_at=datetime(1970, 1, 1, tzinfo=UTC),
-            world_id=WorldId(value=UUID(int=1)),
+            world_id=WorldId(value=self.world_id),
         )
+        self.world = world
         self.runtime = create_terrain_runtime(world=world, config=self.config.terrain_config)
+        self.session_context = RuntimeContext.create(
+            game_mode=GameMode.NEW_GAME,
+            world_seed=self.config.world_seed,
+            session_id=self.world_id,
+        )
+        self.session_context.start()
+        self.save_path: Path | None = (
+            None
+            if self.config.save_path is None
+            else self.config.save_path.expanduser().resolve(strict=False)
+        )
+        self._save_slot: SaveSlot | None = None
+        self._save_service: GameSaveService | None = None
+        if self.save_path is not None:
+            if self.save_path.suffix.lower() != ".json":
+                raise ValueError("save_path must use the .json suffix.")
+            self._save_slot = SaveSlot(self.save_path.stem)
+            paths = ProjectPaths(
+                project_root=self.save_path.parent,
+                save_directory=self.save_path.parent,
+                log_directory=self.save_path.parent / "logs",
+            )
+            self._save_service = GameSaveService(
+                repository=SaveRepository(storage=RuntimeStorage(paths=paths)),
+                context=self.session_context,
+                logger=logging.getLogger("open_world_rpg"),
+            )
         self.edits = BlockEditStore()
         self.editable_world = EditableVoxelWorld(column_at=self._column_at, edits=self.edits)
         self.interactions = VoxelInteractionController(
@@ -223,6 +278,8 @@ class VoxelPrototypeApplication:
         )
         self.hotbar = VoxelHotbar()
         self.last_interaction = InteractionResult.NONE
+        self.save_message = ""
+        self.dirty = False
         self._selection_changed_at = float("-inf")
         self._feedback_until = 0.0
         self._feedback_coordinate: WorldBlockCoordinate | None = None
@@ -389,6 +446,10 @@ class VoxelPrototypeApplication:
                 z=float(spawn_z) + 0.5,
                 grounded=True,
             )
+            if self.config.load_on_start:
+                stage = "save restoration"
+                if not self._load_edits():
+                    raise VoxelPrototypeError("Could not load the requested voxel save.")
             self._stream()
             self._capture_mouse(True)
             self.running = True
@@ -412,6 +473,7 @@ class VoxelPrototypeApplication:
         if not self.running:
             self.initialise()
         frames = 0
+        completed = False
         try:
             while self.running and (max_frames is None or frames < max_frames):
                 assert self._clock is not None
@@ -421,8 +483,11 @@ class VoxelPrototypeApplication:
                 self.update(delta)
                 self.render()
                 frames += 1
+            completed = True
             return 0
         finally:
+            if completed and self.config.autosave and self.dirty:
+                self._save_edits()
             self.shutdown()
 
     def process_events(self) -> None:
@@ -470,6 +535,10 @@ class VoxelPrototypeApplication:
                     self.render_distance = min(4, self.render_distance + 1)
                     self._stream_signature = None
                     self._stream()
+                elif event.key == pygame.K_F7:
+                    self._save_edits()
+                elif event.key == pygame.K_F8:
+                    self._load_edits()
                 elif pygame.K_1 <= event.key <= pygame.K_9:
                     self.hotbar = self.hotbar.select(event.key - pygame.K_1 + 1)
                     self._selection_changed_at = pygame.time.get_ticks() / 1000.0
@@ -778,12 +847,14 @@ class VoxelPrototypeApplication:
 
     def _apply_interaction(self, outcome: InteractionOutcome) -> None:
         self.last_interaction = outcome.result
+        self.save_message = ""
         if not outcome.changed:
             if outcome.result is InteractionResult.PLAYER_INTERSECTION:
                 self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
             return
         self._feedback_coordinate = outcome.coordinate
         self._feedback_until = pygame.time.get_ticks() / 1000.0 + 0.22
+        self.dirty = True
         for coordinate in outcome.invalidated_chunks:
             cached = self._gpu_chunks.pop(coordinate, None)
             if cached is not None:
@@ -796,6 +867,107 @@ class VoxelPrototypeApplication:
             block_at=self.editable_world.material_at,
             maximum_distance=self.config.interaction_reach,
         )
+
+    def _save_edits(self) -> bool:
+        if self._save_service is None or self._save_slot is None:
+            self.save_message = "Save failed"
+            self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+            return False
+        try:
+            self._save_service.save(
+                slot=self._save_slot,
+                block_edits=self.edits.snapshot(),
+            )
+        except Exception:
+            self.save_message = "Save failed"
+            self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+            return False
+        self.dirty = False
+        self.save_message = "World saved"
+        self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+        return True
+
+    def _load_edits(self) -> bool:
+        if self._save_service is None or self._save_slot is None:
+            self.save_message = "Load failed"
+            self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+            return False
+        try:
+            document = self._save_service.load(self._save_slot)
+            restored = self._save_service.restore_block_edits(
+                document,
+                expected_world_id=self.world_id,
+                expected_world_seed=self.config.world_seed,
+            )
+        except Exception:
+            self.save_message = "Load failed"
+            self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+            return False
+        previous = {edit.coordinate: edit.material for edit in self.edits.snapshot().edits}
+        replacement = {edit.coordinate: edit.material for edit in restored.snapshot().edits}
+        changed = {
+            coordinate
+            for coordinate in previous.keys() | replacement.keys()
+            if previous.get(coordinate) is not replacement.get(coordinate)
+        }
+        self.edits = restored
+        self.editable_world = EditableVoxelWorld(
+            column_at=self._column_at,
+            edits=self.edits,
+        )
+        self.interactions = VoxelInteractionController(
+            world=self.editable_world,
+            edits=self.edits,
+            break_cooldown=self.config.break_cooldown,
+            placement_cooldown=self.config.placement_cooldown,
+        )
+        affected = {
+            chunk for coordinate in changed for chunk in invalidated_chunks_for_edit(coordinate)
+        }
+        for coordinate in affected:
+            cached = self._gpu_chunks.pop(coordinate, None)
+            if cached is not None:
+                cached.release()
+        if self._player_intersects_world():
+            self.player = PlayerState(
+                x=float(self.spawn_x) + 0.5,
+                y=safe_spawn_height(
+                    world_x=self.spawn_x,
+                    world_z=self.spawn_z,
+                    height_at=self._height_at,
+                ),
+                z=float(self.spawn_z) + 0.5,
+                grounded=True,
+            )
+        self._stream_signature = None
+        self._stream()
+        self.target = ray_cast(
+            origin=(self.player.x, self.player.y + 1.62, self.player.z),
+            direction=self.camera.forward,
+            block_at=self.editable_world.material_at,
+            maximum_distance=self.config.interaction_reach,
+        )
+        self.dirty = False
+        self.save_message = "World loaded"
+        self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+        return True
+
+    def _player_intersects_world(self) -> bool:
+        for x in range(math.floor(self.player.x - 0.3), math.floor(self.player.x + 0.3) + 1):
+            for y in range(math.floor(self.player.y), math.floor(self.player.y + 1.8) + 1):
+                for z in range(
+                    math.floor(self.player.z - 0.3),
+                    math.floor(self.player.z + 0.3) + 1,
+                ):
+                    coordinate = WorldBlockCoordinate(x=x, y=y, z=z)
+                    if self.editable_world.block_at(
+                        coordinate
+                    ).is_solid and player_intersects_block(
+                        player=self.player,
+                        coordinate=coordinate,
+                    ):
+                        return True
+        return False
 
     def _has_scenery(self, world_x: int, world_z: int) -> bool:
         coordinate = ChunkCoordinate(
@@ -924,6 +1096,8 @@ class VoxelPrototypeApplication:
             edit_revision=self.edits.revision,
             edited_block_count=len(self.edits),
             last_interaction=self.last_interaction.value,
+            save_path=None if self.save_path is None else str(self.save_path),
+            dirty=self.dirty,
         )
         hud = self.hud_snapshot
         lines = [f"{hud.fps:4.0f} FPS"]
@@ -944,6 +1118,7 @@ class VoxelPrototypeApplication:
                     f"face {hud.target_face or 'none'}",
                     f"Edits {hud.edited_block_count}  Revision {hud.edit_revision}",
                     f"Interaction {hud.last_interaction}",
+                    f"Save {hud.save_path or 'disabled'} ({'modified' if hud.dirty else 'clean'})",
                 )
             )
         surface = pygame.Surface((1024, 512), pygame.SRCALPHA)
@@ -1014,7 +1189,8 @@ class VoxelPrototypeApplication:
             label = font.render(selected_material.value.upper(), True, (255, 245, 190))
             surface.blit(label, (surface.get_width() // 2 - label.get_width() // 2, y - 24))
         if now < self._feedback_until:
-            feedback = font.render(self.last_interaction.value, True, (255, 218, 145))
+            message = self.save_message or self.last_interaction.value
+            feedback = font.render(message, True, (255, 218, 145))
             surface.blit(
                 feedback,
                 (surface.get_width() // 2 - feedback.get_width() // 2, y - 46),

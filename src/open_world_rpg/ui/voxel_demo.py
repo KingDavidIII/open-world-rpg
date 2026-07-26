@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Sequence
+from pathlib import Path
 
 from open_world_rpg.ui.voxel.application import (
     VoxelPrototypeApplication,
@@ -21,7 +22,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="render three hidden frames and exit",
     )
+    parser.add_argument(
+        "--save-path",
+        type=Path,
+        help="JSON save path used by F7/F8 and optional startup loading",
+    )
+    parser.add_argument(
+        "--load",
+        action="store_true",
+        dest="load_on_start",
+        help="load the configured save before entering the world",
+    )
+    parser.add_argument(
+        "--autosave",
+        action="store_true",
+        help="save modified block edits after a clean shutdown",
+    )
     arguments = parser.parse_args(argv)
+    if (arguments.load_on_start or arguments.autosave) and arguments.save_path is None:
+        parser.error("--load and --autosave require --save-path")
     config = (
         VoxelPrototypeConfig(
             width_pixels=320,
@@ -30,9 +49,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             render_distance=0,
             hidden_window=True,
             terrain_config=TerrainGenerationConfig(octave_count=1),
+            save_path=arguments.save_path,
+            load_on_start=arguments.load_on_start,
+            autosave=arguments.autosave,
         )
         if arguments.smoke_test
-        else VoxelPrototypeConfig()
+        else VoxelPrototypeConfig(
+            save_path=arguments.save_path,
+            load_on_start=arguments.load_on_start,
+            autosave=arguments.autosave,
+        )
     )
     try:
         return VoxelPrototypeApplication(config=config).run(

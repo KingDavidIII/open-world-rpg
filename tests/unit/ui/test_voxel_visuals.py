@@ -193,6 +193,8 @@ def test_hud_snapshot_projects_negative_coordinates_and_modes() -> None:
         edit_revision=4,
         edited_block_count=3,
         last_interaction="block placed",
+        save_path="C:/saves/voxel.json",
+        dirty=True,
     )
     assert snapshot.block == (-1, 14, -17)
     assert (snapshot.chunk.x, snapshot.chunk.y) == (-1, -2)
@@ -204,6 +206,8 @@ def test_hud_snapshot_projects_negative_coordinates_and_modes() -> None:
     assert snapshot.edit_revision == 4
     assert snapshot.edited_block_count == 3
     assert snapshot.last_interaction == "block placed"
+    assert snapshot.save_path == "C:/saves/voxel.json"
+    assert snapshot.dirty
 
 
 def test_mesh_vertex_layout_has_upward_top_face_winding() -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pygame
 import pytest
 
@@ -9,8 +11,9 @@ from open_world_rpg.ui.voxel.application import (
     VoxelContextUnavailableError,
     VoxelPrototypeApplication,
     VoxelPrototypeConfig,
+    VoxelPrototypeError,
 )
-from open_world_rpg.ui.voxel.collision import RayHit
+from open_world_rpg.ui.voxel.collision import RayHit, ray_cast
 from open_world_rpg.world import (
     CHUNK_SIZE,
     BlockMaterial,
@@ -222,3 +225,106 @@ def test_spawn_generation_failure_is_wrapped_and_cleans_up(
     finally:
         application.shutdown()
     assert not pygame.get_init()
+
+
+def test_voxel_edits_survive_save_restart_and_atomic_reload(tmp_path: Path) -> None:
+    save_path = tmp_path / "voxel-acceptance.json"
+    config = VoxelPrototypeConfig(
+        width_pixels=320,
+        height_pixels=180,
+        render_distance=0,
+        target_fps=120,
+        hidden_window=True,
+        save_path=save_path,
+        terrain_config=TerrainGenerationConfig(octave_count=1),
+    )
+    first = VoxelPrototypeApplication(config=config)
+    try:
+        try:
+            first.initialise()
+        except VoxelContextUnavailableError as error:
+            pytest.skip(str(error))
+        removed = WorldBlockCoordinate(
+            x=first.spawn_x,
+            y=first._height_at(first.spawn_x, first.spawn_z),  # type: ignore[attr-defined]
+            z=first.spawn_z,
+        )
+        first.edits.set_block(removed, BlockMaterial.AIR)
+        grass = WorldBlockCoordinate(x=-1, y=20, z=-1)
+        boundary = WorldBlockCoordinate(x=16, y=21, z=0)
+        first.edits.set_block(grass, BlockMaterial.GRASS)
+        first.edits.set_block(boundary, BlockMaterial.STONE)
+        first.dirty = True
+        saved_revision = first.edits.revision
+        assert first._save_edits()  # type: ignore[attr-defined]
+    finally:
+        first.shutdown()
+
+    second = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(
+            width_pixels=320,
+            height_pixels=180,
+            render_distance=0,
+            target_fps=120,
+            hidden_window=True,
+            save_path=save_path,
+            load_on_start=True,
+            terrain_config=TerrainGenerationConfig(octave_count=1),
+        )
+    )
+    try:
+        try:
+            second.initialise()
+        except VoxelContextUnavailableError as error:
+            pytest.skip(str(error))
+        assert second.editable_world.block_at(removed) is BlockMaterial.AIR
+        assert second.editable_world.block_at(grass) is BlockMaterial.GRASS
+        assert second.editable_world.block_at(boundary) is BlockMaterial.STONE
+        assert second.edits.revision == saved_revision
+        assert not second.dirty
+        assert second._solid_at(boundary.x, boundary.y, boundary.z)  # type: ignore[attr-defined]
+        hit = ray_cast(
+            origin=(boundary.x + 0.5, boundary.y + 2.5, boundary.z + 0.5),
+            direction=(0.0, -1.0, 0.0),
+            block_at=second.editable_world.material_at,
+        )
+        assert hit is not None
+        assert hit.coordinate == boundary
+        second.render()
+
+        newer = WorldBlockCoordinate(x=-16, y=22, z=15)
+        second.edits.set_block(newer, BlockMaterial.SAND)
+        second.dirty = True
+        assert second._save_edits()  # type: ignore[attr-defined]
+        second.edits.set_block(newer, BlockMaterial.SNOW)
+        second.dirty = True
+        assert second._load_edits()  # type: ignore[attr-defined]
+        assert second.editable_world.block_at(newer) is BlockMaterial.SAND
+        assert not second.dirty
+    finally:
+        second.shutdown()
+
+
+def test_requested_missing_voxel_save_fails_startup_cleanly(tmp_path: Path) -> None:
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(
+            width_pixels=160,
+            height_pixels=90,
+            render_distance=0,
+            hidden_window=True,
+            save_path=tmp_path / "missing.json",
+            load_on_start=True,
+            terrain_config=TerrainGenerationConfig(octave_count=1),
+        )
+    )
+    try:
+        try:
+            application.initialise()
+        except VoxelContextUnavailableError as error:
+            pytest.skip(str(error))
+        except VoxelPrototypeError as error:
+            assert "save restoration" in str(error)
+        else:
+            pytest.fail("Expected the requested missing save to fail startup.")
+    finally:
+        application.shutdown()

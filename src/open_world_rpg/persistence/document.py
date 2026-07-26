@@ -15,8 +15,16 @@ from open_world_rpg.application.session import (
     SessionState,
 )
 from open_world_rpg.core.config import MAX_WORLD_SEED, MIN_WORLD_SEED
+from open_world_rpg.world.blocks import (
+    BlockEdit,
+    BlockEditStoreSnapshot,
+    BlockMaterial,
+    WorldBlockCoordinate,
+)
 
 CURRENT_SAVE_SCHEMA_VERSION: Final = 1
+# Compatibility policy: schema v1 may omit the additive ``block_edits`` field.
+# Missing overlays restore as an empty store; present overlays are validated strictly.
 
 JsonValue: TypeAlias = str | int | float | bool | list["JsonValue"] | dict[str, "JsonValue"] | None
 
@@ -27,7 +35,7 @@ _RESUMABLE_SESSION_STATES: Final = frozenset(
     }
 )
 
-_DOCUMENT_KEYS: Final = frozenset(
+_DOCUMENT_REQUIRED_KEYS: Final = frozenset(
     {
         "schema_version",
         "saved_at",
@@ -35,6 +43,7 @@ _DOCUMENT_KEYS: Final = frozenset(
         "payload",
     }
 )
+_DOCUMENT_KEYS: Final = _DOCUMENT_REQUIRED_KEYS | {"block_edits"}
 
 _SESSION_KEYS: Final = frozenset(
     {
@@ -44,6 +53,8 @@ _SESSION_KEYS: Final = frozenset(
         "state",
     }
 )
+_BLOCK_EDIT_OVERLAY_KEYS: Final = frozenset({"revision", "edits"})
+_BLOCK_EDIT_KEYS: Final = frozenset({"x", "y", "z", "material", "revision"})
 
 
 class SaveDocumentError(RuntimeError):
@@ -56,6 +67,93 @@ class SaveCorruptionError(SaveDocumentError):
 
 class SaveCompatibilityError(SaveDocumentError):
     """Raised when a save uses an unsupported schema version."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class PersistedBlockEdit:
+    """Rendering-free canonical representation of one block override."""
+
+    x: int
+    y: int
+    z: int
+    material: BlockMaterial
+    revision: int
+
+    def __post_init__(self) -> None:
+        coordinate = WorldBlockCoordinate(x=self.x, y=self.y, z=self.z)
+        if not isinstance(self.material, BlockMaterial):
+            raise TypeError("material must be a BlockMaterial.")
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int):
+            raise TypeError("revision must be an integer.")
+        if self.revision <= 0:
+            raise ValueError("revision must be positive.")
+        object.__setattr__(self, "x", coordinate.x)
+        object.__setattr__(self, "y", coordinate.y)
+        object.__setattr__(self, "z", coordinate.z)
+
+    @property
+    def coordinate(self) -> WorldBlockCoordinate:
+        return WorldBlockCoordinate(x=self.x, y=self.y, z=self.z)
+
+    def to_block_edit(self) -> BlockEdit:
+        return BlockEdit(
+            coordinate=self.coordinate,
+            material=self.material,
+            revision=self.revision,
+        )
+
+    @classmethod
+    def from_block_edit(cls, edit: BlockEdit) -> PersistedBlockEdit:
+        if not isinstance(edit, BlockEdit):
+            raise TypeError("edit must be a BlockEdit.")
+        return cls(
+            x=edit.coordinate.x,
+            y=edit.coordinate.y,
+            z=edit.coordinate.z,
+            material=edit.material,
+            revision=edit.revision,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PersistedBlockEditOverlay:
+    """Validated complete edit-store persistence boundary."""
+
+    revision: int
+    edits: tuple[PersistedBlockEdit, ...] = ()
+
+    def __post_init__(self) -> None:
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int):
+            raise TypeError("revision must be an integer.")
+        if self.revision < 0:
+            raise ValueError("revision must be non-negative.")
+        if not isinstance(self.edits, tuple):
+            raise TypeError("edits must be a tuple.")
+        if any(not isinstance(edit, PersistedBlockEdit) for edit in self.edits):
+            raise TypeError("edits must contain PersistedBlockEdit values.")
+        ordered = tuple(sorted(self.edits, key=lambda edit: edit.coordinate))
+        if self.edits != ordered:
+            raise ValueError("edits must use deterministic coordinate ordering.")
+        coordinates = tuple(edit.coordinate for edit in self.edits)
+        if len(set(coordinates)) != len(coordinates):
+            raise ValueError("edits must not contain duplicate coordinates.")
+        if any(edit.revision > self.revision for edit in self.edits):
+            raise ValueError("edit revision cannot exceed overlay revision.")
+
+    @classmethod
+    def from_snapshot(cls, snapshot: BlockEditStoreSnapshot) -> PersistedBlockEditOverlay:
+        if not isinstance(snapshot, BlockEditStoreSnapshot):
+            raise TypeError("snapshot must be a BlockEditStoreSnapshot.")
+        return cls(
+            revision=snapshot.revision,
+            edits=tuple(PersistedBlockEdit.from_block_edit(edit) for edit in snapshot.edits),
+        )
+
+    def to_snapshot(self) -> BlockEditStoreSnapshot:
+        return BlockEditStoreSnapshot(
+            revision=self.revision,
+            edits=tuple(edit.to_block_edit() for edit in self.edits),
+        )
 
 
 def _normalise_timestamp(*, name: str, value: object) -> datetime:
@@ -209,6 +307,7 @@ class SaveDocument:
     saved_at: datetime
     session: SessionSnapshot
     payload: dict[str, JsonValue] = field(default_factory=dict)
+    block_edits: PersistedBlockEditOverlay | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.schema_version, bool) or not isinstance(self.schema_version, int):
@@ -232,6 +331,10 @@ class SaveDocument:
 
         if not isinstance(self.session, SessionSnapshot):
             raise TypeError("session must be a SessionSnapshot.")
+        if self.block_edits is not None and not isinstance(
+            self.block_edits, PersistedBlockEditOverlay
+        ):
+            raise TypeError("block_edits must be a PersistedBlockEditOverlay or None.")
 
         object.__setattr__(
             self,
@@ -246,6 +349,7 @@ class SaveDocument:
         context: RuntimeContext,
         payload: dict[str, JsonValue] | None = None,
         saved_at: datetime | None = None,
+        block_edits: PersistedBlockEditOverlay | None = None,
     ) -> SaveDocument:
         """Create a document from a resumable runtime context."""
         if not isinstance(context, RuntimeContext):
@@ -258,6 +362,7 @@ class SaveDocument:
             saved_at=timestamp,
             session=SessionSnapshot.from_runtime_context(context),
             payload={} if payload is None else payload,
+            block_edits=block_edits,
         )
 
     def to_json(self) -> str:
@@ -273,6 +378,20 @@ class SaveDocument:
             },
             "payload": self.payload,
         }
+        if self.block_edits is not None:
+            document["block_edits"] = {
+                "revision": self.block_edits.revision,
+                "edits": [
+                    {
+                        "x": edit.x,
+                        "y": edit.y,
+                        "z": edit.z,
+                        "material": edit.material.value,
+                        "revision": edit.revision,
+                    }
+                    for edit in self.block_edits.edits
+                ],
+            }
 
         return (
             json.dumps(
@@ -303,11 +422,16 @@ class SaveDocument:
             raise SaveCorruptionError("Save document root must be a JSON object.")
 
         document = dict(raw_document)
-        _require_exact_keys(
-            document,
-            expected=_DOCUMENT_KEYS,
-            location="Save document",
-        )
+        missing = sorted(_DOCUMENT_REQUIRED_KEYS - frozenset(document))
+        if missing:
+            raise SaveCorruptionError(
+                f"Save document is missing required fields: {', '.join(missing)}."
+            )
+        unexpected = sorted(frozenset(document) - _DOCUMENT_KEYS)
+        if unexpected:
+            raise SaveCorruptionError(
+                f"Save document contains unexpected fields: {', '.join(unexpected)}."
+            )
 
         schema_version = document["schema_version"]
         if isinstance(schema_version, bool) or not isinstance(schema_version, int):
@@ -327,13 +451,70 @@ class SaveDocument:
             payload = _normalise_payload(document["payload"])
         except (TypeError, ValueError) as exc:
             raise SaveCorruptionError("Save payload is invalid.") from exc
+        block_edits = (
+            None
+            if "block_edits" not in document
+            else cls._parse_block_edits(document["block_edits"])
+        )
 
         return cls(
             schema_version=schema_version,
             saved_at=saved_at,
             session=session,
             payload=payload,
+            block_edits=block_edits,
         )
+
+    @staticmethod
+    def _parse_block_edits(value: object) -> PersistedBlockEditOverlay:
+        if not isinstance(value, dict):
+            raise SaveCorruptionError("block_edits must be a JSON object.")
+        data = dict(value)
+        _require_exact_keys(
+            data,
+            expected=_BLOCK_EDIT_OVERLAY_KEYS,
+            location="Block edit overlay",
+        )
+        revision = data["revision"]
+        raw_edits = data["edits"]
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            raise SaveCorruptionError("block_edits revision must be an integer.")
+        if not isinstance(raw_edits, list):
+            raise SaveCorruptionError("block_edits edits must be a JSON array.")
+        edits: list[PersistedBlockEdit] = []
+        try:
+            for index, raw_edit in enumerate(raw_edits):
+                if not isinstance(raw_edit, dict):
+                    raise SaveCorruptionError(f"block_edits edits[{index}] must be a JSON object.")
+                edit_data = dict(raw_edit)
+                _require_exact_keys(
+                    edit_data,
+                    expected=_BLOCK_EDIT_KEYS,
+                    location=f"Block edit {index}",
+                )
+                material_value = edit_data["material"]
+                if not isinstance(material_value, str):
+                    raise SaveCorruptionError(f"Block edit {index} material must be a string.")
+                try:
+                    material = BlockMaterial(material_value)
+                except ValueError as exc:
+                    raise SaveCorruptionError(
+                        f"Block edit {index} uses unsupported material {material_value!r}."
+                    ) from exc
+                edits.append(
+                    PersistedBlockEdit(
+                        x=edit_data["x"],
+                        y=edit_data["y"],
+                        z=edit_data["z"],
+                        material=material,
+                        revision=edit_data["revision"],
+                    )
+                )
+            return PersistedBlockEditOverlay(revision=revision, edits=tuple(edits))
+        except SaveCorruptionError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise SaveCorruptionError("Block edit overlay is invalid.") from exc
 
     @staticmethod
     def _parse_timestamp(value: object) -> datetime:

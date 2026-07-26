@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import struct
+from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import pygame
 import pytest
@@ -73,6 +76,16 @@ def test_run_validates_bounded_frame_count() -> None:
         VoxelPrototypeConfig(break_cooldown=-1)
     with pytest.raises(ValueError):
         VoxelPrototypeConfig(placement_cooldown=-1)
+    with pytest.raises(TypeError):
+        VoxelPrototypeConfig(save_path="save.json")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        VoxelPrototypeConfig(load_on_start=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        VoxelPrototypeConfig(autosave=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        VoxelPrototypeConfig(load_on_start=True)
+    with pytest.raises(ValueError):
+        VoxelPrototypeConfig(autosave=True)
 
 
 def test_uncaptured_escape_exits_and_unhandled_key_is_harmless(
@@ -141,11 +154,24 @@ def test_hotbar_keyboard_wheel_and_mouse_edit_edges(
 
     monkeypatch.setattr(application.interactions, "break_block", break_block)
     monkeypatch.setattr(application.interactions, "place_block", place_block)
+    save_load_calls: list[str] = []
+    monkeypatch.setattr(
+        application,
+        "_save_edits",
+        lambda: save_load_calls.append("save") is None,
+    )
+    monkeypatch.setattr(
+        application,
+        "_load_edits",
+        lambda: save_load_calls.append("load") is None,
+    )
     monkeypatch.setattr(
         pygame.event,
         "get",
         lambda: [
             pygame.event.Event(pygame.KEYDOWN, key=pygame.K_5),
+            pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F7),
+            pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F8),
             pygame.event.Event(pygame.MOUSEWHEEL, y=-1),
             pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=4),
             pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=5),
@@ -158,6 +184,7 @@ def test_hotbar_keyboard_wheel_and_mouse_edit_edges(
     assert application.hotbar.selected_index == 5
     assert application.hotbar.selected_material is None
     assert calls == ["break", "place"]
+    assert save_load_calls == ["save", "load"]
 
 
 def test_successful_interaction_releases_only_invalidated_cached_meshes(
@@ -203,6 +230,106 @@ def test_successful_interaction_releases_only_invalidated_cached_meshes(
         InteractionOutcome(result=InteractionResult.PLAYER_INTERSECTION)
     )
     assert application.last_interaction is InteractionResult.PLAYER_INTERSECTION
+
+
+def test_voxel_save_load_is_atomic_dirty_and_world_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_path = tmp_path / "voxel.json"
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(save_path=save_path, render_distance=0)
+    )
+    coordinate = WorldBlockCoordinate(x=-16, y=8, z=15)
+    application.edits.set_block(coordinate, BlockMaterial.STONE)
+    application.dirty = True
+    assert application._save_edits()  # type: ignore[attr-defined]
+    assert not application.dirty
+    assert application.save_message == "World saved"
+
+    application.edits.set_block(coordinate, BlockMaterial.DIRT)
+    application.dirty = True
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(
+        "open_world_rpg.ui.voxel.application.ray_cast",
+        lambda **_kwargs: None,
+    )
+    assert application._load_edits()  # type: ignore[attr-defined]
+    assert application.edits.get(coordinate).material is BlockMaterial.STONE  # type: ignore[union-attr]
+    assert not application.dirty
+    assert application.save_message == "World loaded"
+
+    current = application.edits.snapshot()
+    save_path.write_text("{", encoding="utf-8")
+    application.dirty = True
+    assert not application._load_edits()  # type: ignore[attr-defined]
+    assert application.edits.snapshot() == current
+    assert application.dirty
+    assert application.save_message == "Load failed"
+
+    assert application._save_edits()  # type: ignore[attr-defined]
+    raw = json.loads(save_path.read_text(encoding="utf-8"))
+    raw["session"]["session_id"] = str(UUID(int=2))
+    save_path.write_text(json.dumps(raw), encoding="utf-8")
+    assert not application._load_edits()  # type: ignore[attr-defined]
+    assert application.edits.snapshot() == current
+
+
+def test_voxel_save_controls_fail_cleanly_and_autosave_only_after_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disabled = VoxelPrototypeApplication()
+    assert not disabled._save_edits()  # type: ignore[attr-defined]
+    assert not disabled._load_edits()  # type: ignore[attr-defined]
+
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(
+            save_path=tmp_path / "auto.json",
+            autosave=True,
+        )
+    )
+    assert application._save_service is not None  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        "open_world_rpg.ui.voxel.application.GameSaveService.save",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk")),
+    )
+    application.dirty = True
+    assert not application._save_edits()  # type: ignore[attr-defined]
+    assert application.dirty
+    with pytest.raises(ValueError, match=r"\.json"):
+        VoxelPrototypeApplication(config=VoxelPrototypeConfig(save_path=tmp_path / "invalid.txt"))
+
+
+def test_clean_run_autosaves_dirty_edits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(save_path=tmp_path / "auto.json", autosave=True)
+    )
+
+    class Clock:
+        def tick(self, _fps: int) -> int:
+            return 16
+
+        def get_fps(self) -> float:
+            return 60.0
+
+    application.running = True
+    application._clock = cast(Any, Clock())  # type: ignore[attr-defined]
+    application.dirty = True
+    saved = 0
+
+    def save() -> bool:
+        nonlocal saved
+        saved += 1
+        return True
+
+    monkeypatch.setattr(application, "_save_edits", save)
+    monkeypatch.setattr(application, "process_events", lambda: None)
+    monkeypatch.setattr(application, "update", lambda _delta: None)
+    monkeypatch.setattr(application, "render", lambda: None)
+    monkeypatch.setattr(application, "shutdown", lambda: None)
+    assert application.run(max_frames=1) == 0
+    assert saved == 1
 
 
 def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths(
@@ -371,6 +498,7 @@ def test_shutdown_tolerates_resource_release_failures(
 
 def test_voxel_entry_point_selects_smoke_and_interactive_modes(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     calls: list[tuple[VoxelPrototypeConfig, int | None]] = []
 
@@ -389,6 +517,24 @@ def test_voxel_entry_point_selects_smoke_and_interactive_modes(
     assert voxel_demo.main([]) == 0
     assert not calls[-1][0].hidden_window
     assert calls[-1][1] is None
+    save_path = tmp_path / "voxel.json"
+    assert (
+        voxel_demo.main(
+            [
+                "--smoke-test",
+                "--save-path",
+                str(save_path),
+                "--load",
+                "--autosave",
+            ]
+        )
+        == 0
+    )
+    assert calls[-1][0].save_path == save_path
+    assert calls[-1][0].load_on_start
+    assert calls[-1][0].autosave
+    with pytest.raises(SystemExit):
+        voxel_demo.main(["--load"])
 
 
 def test_voxel_entry_point_reports_runtime_failure(
