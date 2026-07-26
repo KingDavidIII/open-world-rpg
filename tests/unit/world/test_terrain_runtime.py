@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import FrozenInstanceError
 from typing import Any, NoReturn, cast
 
@@ -71,11 +72,13 @@ def create_runtime(
     event_bus: EventBus | None = None,
     service: TerrainGenerationService | None = None,
     specification: WorldSpecification = SPECIFICATION,
+    logger: logging.Logger | None = None,
 ) -> TerrainRuntime:
     return TerrainRuntime(
         specification=specification,
         service=create_service(specification=specification) if service is None else service,
         event_bus=event_bus,
+        logger=logger,
     )
 
 
@@ -100,6 +103,7 @@ def test_construction_is_empty_compatible_and_does_not_generate() -> None:
     assert runtime.revision == 0
     assert runtime.coordinates() == ()
     assert service.snapshot().successful_generations == 0
+    assert isinstance(runtime.logger, logging.Logger)
 
 
 @pytest.mark.parametrize(
@@ -108,6 +112,7 @@ def test_construction_is_empty_compatible_and_does_not_generate() -> None:
         ("specification", object(), "specification must be"),
         ("service", object(), "service must be"),
         ("event_bus", object(), "event_bus must be"),
+        ("logger", object(), "logger must be"),
     ],
 )
 def test_construction_validates_dependency_types(
@@ -646,6 +651,89 @@ def test_no_events_for_no_ops_or_failed_validation() -> None:
         runtime.activate(coordinate)
 
     assert event_bus.pending_event_count == 0
+
+
+class RecordingHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def test_structured_diagnostics_cover_successful_lifecycle_in_order() -> None:
+    logger = logging.Logger("test.terrain.runtime", level=logging.DEBUG)
+    handler = RecordingHandler()
+    logger.addHandler(handler)
+    runtime = TerrainRuntime(
+        specification=SPECIFICATION,
+        service=create_service(),
+        logger=logger,
+    )
+    coordinate = ChunkCoordinate(x=-17, y=16)
+
+    runtime.get_or_generate(coordinate)
+    runtime.activate(coordinate)
+    runtime.suspend(coordinate)
+    runtime.unload(coordinate)
+    runtime.fail(coordinate)
+
+    assert [record.event for record in handler.records] == [
+        "terrain.chunk_declared",
+        "terrain.generation_started",
+        "terrain.chunk_generated",
+        "terrain.chunk_activated",
+        "terrain.chunk_suspended",
+        "terrain.chunk_unloaded",
+        "terrain.chunk_failed",
+    ]
+    generated = handler.records[2]
+    assert generated.chunk_x == -17
+    assert generated.chunk_y == 16
+    assert generated.region_x == -2
+    assert generated.region_y == 1
+    assert generated.chunk_state == "ready"
+    assert generated.previous_chunk_state == "generating"
+    assert generated.terrain_runtime_revision == 3
+    assert generated.terrain_repository_revision == 1
+    assert generated.terrain_seed == runtime.metadata_at(coordinate).terrain_seed
+    assert generated.terrain_min_elevation <= generated.terrain_max_elevation
+    assert generated.terrain_tile_count == 256
+    assert generated.terrain_cache_hits == 0
+    assert generated.terrain_cache_misses == 0
+    assert generated.terrain_successful_generations == 1
+    assert generated.terrain_failed_generations == 0
+    assert generated.terrain_evictions == 0
+    declared = handler.records[0]
+    assert not hasattr(declared, "previous_chunk_state")
+    assert not hasattr(declared, "terrain_min_elevation")
+
+
+def test_failure_diagnostic_occurs_after_failed_transition_and_no_ops_do_not_log() -> None:
+    logger = logging.Logger("test.terrain.failure", level=logging.DEBUG)
+    handler = RecordingHandler()
+    logger.addHandler(handler)
+    runtime = create_runtime(
+        service=create_service(generator=FailingGenerator()),
+        logger=logger,
+    )
+    coordinate = ChunkCoordinate(x=1, y=1)
+
+    runtime.declare(coordinate)
+    runtime.declare(coordinate)
+    with pytest.raises(TerrainRuntimeGenerationError):
+        runtime.generate(coordinate)
+    runtime.fail(coordinate)
+
+    assert [record.event for record in handler.records] == [
+        "terrain.chunk_declared",
+        "terrain.generation_started",
+        "terrain.chunk_failed",
+    ]
+    assert handler.records[-1].chunk_state == "failed"
+    assert handler.records[-1].terrain_runtime_revision == 3
+    assert handler.records[-1].terrain_failed_generations == 1
 
 
 def test_runtime_error_hierarchy_and_public_exports() -> None:

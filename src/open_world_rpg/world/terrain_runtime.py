@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import NoReturn
 
+from open_world_rpg.core.diagnostics import LOGGER_NAME
 from open_world_rpg.engine.events import EventBus
 from open_world_rpg.world.coordinates import ChunkCoordinate, RegionCoordinate
 from open_world_rpg.world.model import WorldSpecification
@@ -180,7 +182,14 @@ class TerrainRuntimeSnapshot:
 class TerrainRuntime:
     """Coordinate chunk lifecycle, terrain cache access, and immutable events."""
 
-    __slots__ = ("_event_bus", "_metadata", "_revision", "_service", "_specification")
+    __slots__ = (
+        "_event_bus",
+        "_logger",
+        "_metadata",
+        "_revision",
+        "_service",
+        "_specification",
+    )
 
     def __init__(
         self,
@@ -188,6 +197,7 @@ class TerrainRuntime:
         specification: WorldSpecification,
         service: TerrainGenerationService,
         event_bus: EventBus | None = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         if not isinstance(specification, WorldSpecification):
             raise TypeError("specification must be a WorldSpecification.")
@@ -195,6 +205,8 @@ class TerrainRuntime:
             raise TypeError("service must be a TerrainGenerationService.")
         if event_bus is not None and not isinstance(event_bus, EventBus):
             raise TypeError("event_bus must be an EventBus or None.")
+        if logger is not None and not isinstance(logger, logging.Logger):
+            raise TypeError("logger must be a logging.Logger or None.")
         if (
             service.specification != specification
             or service.config.generation_format_version != specification.generation_format_version
@@ -205,6 +217,7 @@ class TerrainRuntime:
         self._specification = specification
         self._service = service
         self._event_bus = event_bus
+        self._logger = logging.getLogger(LOGGER_NAME) if logger is None else logger
         self._metadata: dict[ChunkCoordinate, ChunkMetadata] = {}
         self._revision = 0
 
@@ -222,6 +235,11 @@ class TerrainRuntime:
     def revision(self) -> int:
         """Return the number of committed metadata state changes."""
         return self._revision
+
+    @property
+    def logger(self) -> logging.Logger:
+        """Return the logger used for structured terrain diagnostics."""
+        return self._logger
 
     def declare(self, coordinate: ChunkCoordinate) -> ChunkMetadata:
         """Declare missing metadata; an existing coordinate is a no-op."""
@@ -244,6 +262,12 @@ class TerrainRuntime:
                 runtime_revision=self._revision,
             )
         )
+        self._log(
+            level=logging.INFO,
+            event="terrain.chunk_declared",
+            message="Terrain chunk declared.",
+            metadata=metadata,
+        )
         return metadata
 
     def generate(self, coordinate: ChunkCoordinate) -> ChunkTerrain:
@@ -258,6 +282,13 @@ class TerrainRuntime:
                 runtime_revision=self._revision,
             )
         )
+        self._log(
+            level=logging.DEBUG,
+            event="terrain.generation_started",
+            message="Terrain generation started.",
+            metadata=generating,
+            previous_state=metadata.state,
+        )
         try:
             terrain = self._service.generate_new(coordinate)
         except Exception as error:
@@ -270,6 +301,13 @@ class TerrainRuntime:
                     runtime_revision=self._revision,
                     error_type_name=type(error).__name__,
                 )
+            )
+            self._log(
+                level=logging.ERROR,
+                event="terrain.chunk_failed",
+                message="Terrain chunk generation failed.",
+                metadata=failed,
+                previous_state=generating.state,
             )
             raise TerrainRuntimeGenerationError(
                 f"Terrain generation failed for chunk ({coordinate.x}, {coordinate.y})."
@@ -286,6 +324,14 @@ class TerrainRuntime:
                 runtime_revision=self._revision,
                 repository_revision=self._service.snapshot().repository_revision,
             )
+        )
+        self._log(
+            level=logging.INFO,
+            event="terrain.chunk_generated",
+            message="Terrain chunk generated.",
+            metadata=ready,
+            previous_state=generating.state,
+            terrain=terrain,
         )
         return terrain
 
@@ -315,6 +361,13 @@ class TerrainRuntime:
             self._raise_invalid(operation="activate", metadata=metadata)
         transitioned = self._transition(metadata, ChunkState.ACTIVE)
         self._publish_lifecycle(TerrainChunkActivated, metadata, transitioned)
+        self._log(
+            level=logging.INFO,
+            event="terrain.chunk_activated",
+            message="Terrain chunk activated.",
+            metadata=transitioned,
+            previous_state=metadata.state,
+        )
         return transitioned
 
     def suspend(self, coordinate: ChunkCoordinate) -> ChunkMetadata:
@@ -326,6 +379,13 @@ class TerrainRuntime:
             self._raise_invalid(operation="suspend", metadata=metadata)
         transitioned = self._transition(metadata, ChunkState.SUSPENDED)
         self._publish_lifecycle(TerrainChunkSuspended, metadata, transitioned)
+        self._log(
+            level=logging.INFO,
+            event="terrain.chunk_suspended",
+            message="Terrain chunk suspended.",
+            metadata=transitioned,
+            previous_state=metadata.state,
+        )
         return transitioned
 
     def unload(self, coordinate: ChunkCoordinate) -> ChunkMetadata:
@@ -343,6 +403,13 @@ class TerrainRuntime:
             ) from error
         transitioned = self._transition(metadata, ChunkState.UNLOADED)
         self._publish_lifecycle(TerrainChunkUnloaded, metadata, transitioned)
+        self._log(
+            level=logging.INFO,
+            event="terrain.chunk_unloaded",
+            message="Terrain chunk unloaded.",
+            metadata=transitioned,
+            previous_state=metadata.state,
+        )
         return transitioned
 
     def fail(self, coordinate: ChunkCoordinate) -> ChunkMetadata:
@@ -359,6 +426,13 @@ class TerrainRuntime:
                 runtime_revision=self._revision,
                 error_type_name="ExplicitTerrainFailure",
             )
+        )
+        self._log(
+            level=logging.ERROR,
+            event="terrain.chunk_failed",
+            message="Terrain chunk failed.",
+            metadata=transitioned,
+            previous_state=metadata.state,
         )
         return transitioned
 
@@ -448,6 +522,45 @@ class TerrainRuntime:
     def _publish(self, event: object) -> None:
         if self._event_bus is not None:
             self._event_bus.publish(event)
+
+    def _log(
+        self,
+        *,
+        level: int,
+        event: str,
+        message: str,
+        metadata: ChunkMetadata,
+        previous_state: ChunkState | None = None,
+        terrain: ChunkTerrain | None = None,
+    ) -> None:
+        service = self._service.snapshot()
+        context: dict[str, object] = {
+            "event": event,
+            "chunk_x": metadata.coordinate.x,
+            "chunk_y": metadata.coordinate.y,
+            "region_x": metadata.region_coordinate.x,
+            "region_y": metadata.region_coordinate.y,
+            "chunk_state": metadata.state.value,
+            "terrain_runtime_revision": self._revision,
+            "terrain_repository_revision": service.repository_revision,
+            "terrain_seed": metadata.terrain_seed,
+            "terrain_cache_hits": service.cache_hits,
+            "terrain_cache_misses": service.cache_misses,
+            "terrain_successful_generations": service.successful_generations,
+            "terrain_failed_generations": service.failed_generations,
+            "terrain_evictions": service.evictions,
+        }
+        if previous_state is not None:
+            context["previous_chunk_state"] = previous_state.value
+        if terrain is not None:
+            context.update(
+                {
+                    "terrain_min_elevation": terrain.minimum_elevation.metres,
+                    "terrain_max_elevation": terrain.maximum_elevation.metres,
+                    "terrain_tile_count": len(terrain),
+                }
+            )
+        self._logger.log(level, message, extra=context)
 
     @staticmethod
     def _validate_coordinate(coordinate: object) -> None:
