@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Final
 
 from open_world_rpg.world import (
     CHUNK_SIZE,
@@ -13,20 +12,11 @@ from open_world_rpg.world import (
     RegionCoordinate,
     TerrainGenerationServiceSnapshot,
     TerrainRuntime,
-    TerrainType,
     WorldPosition,
 )
 
-RgbColour = tuple[int, int, int]
-
-TERRAIN_PALETTE: Final[dict[TerrainType, RgbColour]] = {
-    TerrainType.DEEP_WATER: (18, 52, 96),
-    TerrainType.SHALLOW_WATER: (38, 104, 166),
-    TerrainType.COAST: (218, 199, 134),
-    TerrainType.PLAINS: (91, 153, 78),
-    TerrainType.HILLS: (112, 126, 72),
-    TerrainType.MOUNTAINS: (116, 116, 124),
-}
+from .terrain_style import TERRAIN_PALETTE as TERRAIN_PALETTE
+from .terrain_style import VISUAL_STYLE_REVISION
 
 
 def _require_positive_integer(*, name: str, value: object) -> None:
@@ -100,6 +90,53 @@ class CameraState:
     def world_tile(self) -> WorldPosition:
         """Return the tile containing the camera centre using floor semantics."""
         return WorldPosition(x=math.floor(self.x_tiles), y=math.floor(self.y_tiles))
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ZoomState:
+    """Validated integer tile scale preserving the camera's world centre."""
+
+    tile_size_pixels: int = 20
+    minimum_tile_size_pixels: int = 6
+    maximum_tile_size_pixels: int = 48
+    step_pixels: int = 2
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("tile_size_pixels", self.tile_size_pixels),
+            ("minimum_tile_size_pixels", self.minimum_tile_size_pixels),
+            ("maximum_tile_size_pixels", self.maximum_tile_size_pixels),
+            ("step_pixels", self.step_pixels),
+        ):
+            _require_positive_integer(name=name, value=value)
+        if self.minimum_tile_size_pixels > self.maximum_tile_size_pixels:
+            raise ValueError("minimum tile size must not exceed maximum tile size.")
+        if (
+            not self.minimum_tile_size_pixels
+            <= self.tile_size_pixels
+            <= self.maximum_tile_size_pixels
+        ):
+            raise ValueError("tile size must be within the configured zoom limits.")
+
+    def changed(self, *, steps: int) -> ZoomState:
+        """Return a clamped zoom while leaving world camera coordinates untouched."""
+        if isinstance(steps, bool) or not isinstance(steps, int):
+            raise TypeError("steps must be an integer.")
+        size = max(
+            self.minimum_tile_size_pixels,
+            min(
+                self.maximum_tile_size_pixels,
+                self.tile_size_pixels + steps * self.step_pixels,
+            ),
+        )
+        if size == self.tile_size_pixels:
+            return self
+        return ZoomState(
+            tile_size_pixels=size,
+            minimum_tile_size_pixels=self.minimum_tile_size_pixels,
+            maximum_tile_size_pixels=self.maximum_tile_size_pixels,
+            step_pixels=self.step_pixels,
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -243,7 +280,7 @@ def terrain_surface_cache_key(
     terrain: ChunkTerrain,
     *,
     tile_size_pixels: int,
-) -> tuple[ChunkCoordinate, int, int, str, int]:
+) -> tuple[ChunkCoordinate, int, int, str, int, int]:
     """Return fields whose change requires rebuilding a chunk surface."""
     if not isinstance(terrain, ChunkTerrain):
         raise TypeError("terrain must be a ChunkTerrain.")
@@ -254,4 +291,5 @@ def terrain_surface_cache_key(
         terrain.revision,
         terrain.generation_format_version,
         tile_size_pixels,
+        VISUAL_STYLE_REVISION,
     )

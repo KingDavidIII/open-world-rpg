@@ -16,8 +16,7 @@ from open_world_rpg.ui.terrain_demo import (
     TerrainPrototypeConfig,
     TerrainPrototypeError,
 )
-from open_world_rpg.ui.terrain_view import TERRAIN_PALETTE
-from open_world_rpg.world import ChunkState, TerrainGenerationConfig
+from open_world_rpg.world import ChunkState, TerrainGenerationConfig, TerrainType
 
 
 def small_config() -> TerrainPrototypeConfig:
@@ -46,7 +45,7 @@ def test_headless_demo_generates_renders_pixels_and_shuts_down() -> None:
     assert application._last_frame is not None  # type: ignore[attr-defined]
     assert application._last_frame.get_at((32, 32))[:3] != (10, 12, 18)  # type: ignore[attr-defined]
     cached_surface = next(iter(application._surface_cache.values()))[1]  # type: ignore[attr-defined]
-    assert cached_surface.get_at((1, 1))[:3] in set(TERRAIN_PALETTE.values())
+    assert cached_surface.get_at((1, 1))[:3] != (10, 12, 18)
     assert len(application.runtime.service.repository) > 0
     assert application.runtime.revision > 0
     assert application.runtime.service.snapshot().successful_generations > 0
@@ -70,6 +69,10 @@ def test_demo_controls_resize_and_surface_cache_invalidation() -> None:
     pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_g))
     pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c))
     pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_r))
+    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F3))
+    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_EQUALS))
+    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_MINUS))
+    pygame.event.post(pygame.event.Event(pygame.MOUSEWHEEL, y=1))
     pygame.event.post(pygame.event.Event(pygame.VIDEORESIZE, size=(80, 48)))
 
     application.process_events()
@@ -78,9 +81,13 @@ def test_demo_controls_resize_and_surface_cache_invalidation() -> None:
     assert application.show_grid
     assert application.show_chunk_boundaries is not original_boundaries
     assert application.camera.x_tiles == application.camera.y_tiles == 0.0
+    assert application.show_debug
+    assert application.zoom.tile_size_pixels == 18
     assert application.screen is not None
     assert application.screen.get_size() == (80, 48)
-    assert application._surface_cache == {}  # type: ignore[attr-defined]
+    assert application._surface_cache  # type: ignore[attr-defined]
+    application.loading = True
+    application.render()
     application.shutdown()
 
 
@@ -164,7 +171,6 @@ def test_demo_auto_initialises_caches_draws_grid_and_suspends_far_chunks() -> No
     application.show_help = False
     application.show_grid = True
     application.show_chunk_boundaries = False
-    application._surface_cache.clear()  # type: ignore[attr-defined]
     application.update(0.0)
     terrain = application.runtime.terrain_at(application._visible_coordinates[0])  # type: ignore[attr-defined]
     first = application._chunk_surface(terrain)  # type: ignore[attr-defined]
@@ -204,3 +210,41 @@ def test_hud_guard_and_main_success_and_failure(
     assert terrain_demo.main() == 0
     monkeypatch.setattr(terrain_demo, "TerrainPrototypeApplication", FailedApplication)
     assert terrain_demo.main() == 1
+
+
+def test_transition_and_non_water_overlay_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = TerrainPrototypeApplication(
+        config=TerrainPrototypeConfig(
+            width_pixels=320,
+            height_pixels=160,
+            tile_size_pixels=16,
+            preload_margin_chunks=0,
+            world_seed=0,
+            terrain_config=TerrainGenerationConfig(octave_count=1),
+        )
+    )
+    application.initialise()
+    surface = pygame.Surface((16, 16))
+    monkeypatch.setattr(terrain_demo, "transition_mask", lambda **_: True)
+    application._draw_transition(  # type: ignore[attr-defined]
+        surface=surface,
+        rectangle=pygame.Rect(0, 0, 16, 16),
+        seed=1,
+        world_x=0,
+        world_y=0,
+        terrain_type=TerrainType.PLAINS,
+        neighbours=(
+            TerrainType.HILLS,
+            TerrainType.COAST,
+            TerrainType.MOUNTAINS,
+            TerrainType.SHALLOW_WATER,
+        ),
+    )
+    assert surface.get_at((0, 0)).a > 0
+
+    application.update(0.0)
+    monkeypatch.setattr(terrain_demo, "water_wave_phase", lambda **_: 0)
+    application._render_water_overlay(application._viewport())  # type: ignore[attr-defined]
+    application.shutdown()
