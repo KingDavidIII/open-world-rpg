@@ -8,37 +8,38 @@ gameplay systems, and persistent save support.
 
 ## Current milestone
 
-**v0.6.0 - Player Interaction Foundation**
+**v0.7.0 - Inventory and Resource Gameplay**
 
-The player interaction foundation includes:
+The inventory and resource gameplay foundation includes:
 
-- Stable editable BlockMaterial domain
-- Absolute WorldBlockCoordinate model
-- Immutable BlockEdit records
-- Revisioned BlockEditStore overlay
-- Generated-terrain immutability
-- Unified editable voxel block resolver
-- First-person block targeting
-- Left-click block breaking
-- Right-click block placement
-- Placement face-normal resolution
-- Player-body placement rejection
-- Interaction reach and cooldown policies
-- Nine-slot creative hotbar
-- Number-key and mouse-wheel selection
-- Immediate mesh invalidation after edits
-- Cross-chunk boundary invalidation
-- Collision against placed and removed blocks
-- Gravity after support removal
-- Persistent block edits in save documents
-- Backward-compatible legacy save loading
-- Atomic save and restore
-- World identity and seed validation
-- Dirty-state tracking
-- F7 save and F8 reload controls
-- Optional `--save-path`, `--load` and `--autosave` CLI options
-- Selective mesh reconciliation after loading
-- 1,580 passing tests
+- Stable ItemType domain
+- Mappings between block materials and collectible items
+- Immutable ItemStack values with a maximum stack size of 64
+- 27-slot PlayerInventory with the first nine slots serving as the hotbar
+- Deterministic first-fit stacking and partial-stack filling
+- Atomic inventory removal and restoration
+- Explicit inventory revision semantics
+- Deterministic starter inventory
+- Inventory-backed block placement with exact placement consumption
+- Dropped-item spawning after block breaking
+- One-block-to-one-item drop policy
+- Deterministic dropped-item identifiers
+- Dropped-item gravity and ground collision
+- Pickup delays, radius and partial pickup
+- Full-inventory pickup rejection
+- 300-second despawn policy
+- 1,024-item active-drop cap
+- Batched procedural item rendering
+- Shared GPU buffer and VAO reuse
+- Settled-item physics optimisation
+- Inventory and dropped-item persistence
+- Additive schema-v1 save compatibility
+- Deterministic bootstrap inventory for legacy saves
+- Atomic inventory and dropped-item restoration
+- Dirty-state integration
+- Persisted selected hotbar slot
+- End-to-end restart acceptance
+- 1,604 passing tests
 - Zero skipped tests
 - 100% statement and branch coverage
 
