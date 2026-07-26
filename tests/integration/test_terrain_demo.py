@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
-
 import pygame
 import pytest
 
@@ -17,6 +12,18 @@ from open_world_rpg.ui.terrain_demo import (
     TerrainPrototypeError,
 )
 from open_world_rpg.world import ChunkState, TerrainGenerationConfig, TerrainType
+
+
+@pytest.fixture(autouse=True)
+def isolated_dummy_sdl(monkeypatch: pytest.MonkeyPatch):
+    """Contain SDL dummy configuration and pygame resources per test."""
+    pygame.quit()
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.setenv("SDL_AUDIODRIVER", "dummy")
+    try:
+        yield
+    finally:
+        pygame.quit()
 
 
 def small_config() -> TerrainPrototypeConfig:

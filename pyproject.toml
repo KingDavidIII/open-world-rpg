@@ -29,6 +29,7 @@ classifiers = [
     "Topic :: Games/Entertainment :: Role-Playing"
 ]
 dependencies = [
+    "moderngl>=5.12,<6",
     "pygame-ce>=2.5.5,<3"
 ]
 
@@ -44,6 +45,7 @@ dev = [
 [project.scripts]
 open-world-rpg = "open_world_rpg.__main__:main"
 open-world-rpg-terrain-demo = "open_world_rpg.ui.terrain_demo:main"
+open-world-rpg-voxel-demo = "open_world_rpg.ui.voxel_demo:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/open_world_rpg"]
