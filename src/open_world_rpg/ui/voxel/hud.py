@@ -5,7 +5,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from open_world_rpg.world import CHUNK_SIZE, REGION_SIZE_IN_CHUNKS, ChunkCoordinate
+from open_world_rpg.world import (
+    CHUNK_SIZE,
+    REGION_SIZE_IN_CHUNKS,
+    BlockMaterial,
+    ChunkCoordinate,
+)
 
 from .camera import PlayerState
 from .collision import RayHit
@@ -28,6 +33,12 @@ class VoxelHudSnapshot:
     render_distance: int
     mode: str
     target: tuple[int, int, int] | None
+    target_material: BlockMaterial | None
+    target_face: tuple[int, int, int] | None
+    selected_material: BlockMaterial | None
+    edit_revision: int
+    edited_block_count: int
+    last_interaction: str
     loading: bool
 
     @classmethod
@@ -44,6 +55,10 @@ class VoxelHudSnapshot:
         render_distance: int,
         target: RayHit | None,
         loading: bool,
+        selected_material: BlockMaterial | None = None,
+        edit_revision: int = 0,
+        edited_block_count: int = 0,
+        last_interaction: str = "none",
     ) -> VoxelHudSnapshot:
         block = (math.floor(player.x), math.floor(player.y), math.floor(player.z))
         chunk = ChunkCoordinate(
@@ -67,5 +82,11 @@ class VoxelHudSnapshot:
             render_distance=render_distance,
             mode="FLY" if player.flying else "WALK",
             target=None if target is None else (target.x, target.y, target.z),
+            target_material=None if target is None else target.material,
+            target_face=None if target is None else target.face_normal,
+            selected_material=selected_material,
+            edit_revision=edit_revision,
+            edited_block_count=edited_block_count,
+            last_interaction=last_interaction,
             loading=loading,
         )

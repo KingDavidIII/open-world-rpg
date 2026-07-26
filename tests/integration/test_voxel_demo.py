@@ -11,7 +11,13 @@ from open_world_rpg.ui.voxel.application import (
     VoxelPrototypeConfig,
 )
 from open_world_rpg.ui.voxel.collision import RayHit
-from open_world_rpg.world import CHUNK_SIZE, ChunkState, TerrainGenerationConfig
+from open_world_rpg.world import (
+    CHUNK_SIZE,
+    BlockMaterial,
+    ChunkState,
+    TerrainGenerationConfig,
+    WorldBlockCoordinate,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -76,6 +82,41 @@ def test_voxel_controls_targeting_and_shutdown_cleanup(
         assert not application.show_help
         assert application.show_debug
         assert application.player.flying
+
+        surface_y = application._height_at(application.spawn_x, application.spawn_z)  # type: ignore[attr-defined]
+        surface = WorldBlockCoordinate(
+            x=application.spawn_x,
+            y=surface_y,
+            z=application.spawn_z,
+        )
+        application.target = RayHit(
+            x=surface.x,
+            y=surface.y,
+            z=surface.z,
+            distance=1.0,
+            material=application.editable_world.block_at(surface),
+            face_normal=(0, 1, 0),
+        )
+        revision = application.edits.revision
+        pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1))
+        application.process_events()
+        assert application.edits.revision == revision + 1
+        assert application.editable_world.block_at(surface) is BlockMaterial.AIR
+        support = surface.offset(y=-1)
+        application.target = RayHit(
+            x=support.x,
+            y=support.y,
+            z=support.z,
+            distance=1.0,
+            material=application.editable_world.block_at(support),
+            face_normal=(0, 1, 0),
+        )
+        pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3))
+        application.process_events()
+        assert application.editable_world.block_at(surface) is BlockMaterial.GRASS
+        assert application.edits.revision == revision + 2
+        application._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.0  # type: ignore[attr-defined]
+        application.render()
 
         class FlyingKeys:
             def __getitem__(self, key: int) -> bool:

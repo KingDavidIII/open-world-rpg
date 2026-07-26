@@ -20,7 +20,13 @@ from open_world_rpg.ui.voxel.application import (
     _water_render_order,
 )
 from open_world_rpg.ui.voxel.collision import RayHit
-from open_world_rpg.world import ChunkCoordinate, TerrainGenerationConfig
+from open_world_rpg.ui.voxel.interaction import InteractionOutcome, InteractionResult
+from open_world_rpg.world import (
+    BlockMaterial,
+    ChunkCoordinate,
+    TerrainGenerationConfig,
+    WorldBlockCoordinate,
+)
 
 
 def test_projection_and_view_matrices_are_finite_deterministic_matrices() -> None:
@@ -57,6 +63,16 @@ def test_run_validates_bounded_frame_count() -> None:
     application._render_target_outline(  # type: ignore[attr-defined]
         RayHit(x=0, y=0, z=0, distance=0.0)
     )
+    with pytest.raises(TypeError):
+        VoxelPrototypeConfig(interaction_reach=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        VoxelPrototypeConfig(interaction_reach=float("inf"))
+    with pytest.raises(ValueError):
+        VoxelPrototypeConfig(interaction_reach=0)
+    with pytest.raises(ValueError):
+        VoxelPrototypeConfig(break_cooldown=-1)
+    with pytest.raises(ValueError):
+        VoxelPrototypeConfig(placement_cooldown=-1)
 
 
 def test_uncaptured_escape_exits_and_unhandled_key_is_harmless(
@@ -100,7 +116,98 @@ def test_render_distance_controls_clamp_between_one_and_four(
     assert stream_calls == 9
 
 
-def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths() -> None:
+def test_hotbar_keyboard_wheel_and_mouse_edit_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.mouse_captured = True
+    application.target = RayHit(
+        x=0,
+        y=1,
+        z=0,
+        distance=1.0,
+        material=BlockMaterial.STONE,
+        face_normal=(0, 1, 0),
+    )
+    calls: list[str] = []
+
+    def break_block(**_kwargs: object) -> InteractionOutcome:
+        calls.append("break")
+        return InteractionOutcome(result=InteractionResult.NO_TARGET)
+
+    def place_block(**_kwargs: object) -> InteractionOutcome:
+        calls.append("place")
+        return InteractionOutcome(result=InteractionResult.NO_TARGET)
+
+    monkeypatch.setattr(application.interactions, "break_block", break_block)
+    monkeypatch.setattr(application.interactions, "place_block", place_block)
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [
+            pygame.event.Event(pygame.KEYDOWN, key=pygame.K_5),
+            pygame.event.Event(pygame.MOUSEWHEEL, y=-1),
+            pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=4),
+            pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=5),
+            pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1),
+            pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3),
+            pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=2),
+        ],
+    )
+    application.process_events()
+    assert application.hotbar.selected_index == 5
+    assert application.hotbar.selected_material is None
+    assert calls == ["break", "place"]
+
+
+def test_successful_interaction_releases_only_invalidated_cached_meshes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Cached:
+        released = False
+
+        def release(self) -> None:
+            self.released = True
+
+    application = VoxelPrototypeApplication()
+    affected = ChunkCoordinate(x=0, y=0)
+    retained = ChunkCoordinate(x=1, y=1)
+    removed = Cached()
+    kept = Cached()
+    application._gpu_chunks[affected] = cast(Any, removed)  # type: ignore[attr-defined]
+    application._gpu_chunks[retained] = cast(Any, kept)  # type: ignore[attr-defined]
+    stream_calls = 0
+
+    def stream() -> None:
+        nonlocal stream_calls
+        stream_calls += 1
+
+    monkeypatch.setattr(application, "_stream", stream)
+    monkeypatch.setattr(
+        "open_world_rpg.ui.voxel.application.ray_cast",
+        lambda **_kwargs: None,
+    )
+    application._apply_interaction(  # type: ignore[attr-defined]
+        InteractionOutcome(
+            result=InteractionResult.BROKEN,
+            coordinate=WorldBlockCoordinate(x=0, y=1, z=0),
+            invalidated_chunks=(affected, ChunkCoordinate(x=9, y=9)),
+        )
+    )
+    assert removed.released
+    assert not kept.released
+    assert affected not in application._gpu_chunks  # type: ignore[attr-defined]
+    assert retained in application._gpu_chunks  # type: ignore[attr-defined]
+    assert stream_calls == 1
+    application._apply_interaction(  # type: ignore[attr-defined]
+        InteractionOutcome(result=InteractionResult.PLAYER_INTERSECTION)
+    )
+    assert application.last_interaction is InteractionResult.PLAYER_INTERSECTION
+
+
+def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     application = VoxelPrototypeApplication()
     application.show_help = True
     application.show_debug = False
@@ -110,6 +217,7 @@ def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths() -> N
     assert "target 1,2,3" in application._caption(12)  # type: ignore[attr-defined]
 
     application._render_hud(0)  # type: ignore[attr-defined]
+    application._draw_hotbar(pygame.Surface((1024, 512), pygame.SRCALPHA))  # type: ignore[attr-defined]
 
     class Resource:
         def write(self, _data: bytes) -> None:
@@ -139,6 +247,10 @@ def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths() -> N
     application._hud_array = cast(Any, Resource())  # type: ignore[attr-defined]
     application._font = cast(Any, Font())  # type: ignore[attr-defined]
     application.loading = True
+    application._selection_changed_at = 0.0  # type: ignore[attr-defined]
+    application._feedback_until = 2.0  # type: ignore[attr-defined]
+    application.last_interaction = InteractionResult.BROKEN
+    monkeypatch.setattr(pygame.time, "get_ticks", lambda: 1000)
     application._render_hud(12)  # type: ignore[attr-defined]
     assert application.hud_snapshot is not None
     assert application.hud_snapshot.loading

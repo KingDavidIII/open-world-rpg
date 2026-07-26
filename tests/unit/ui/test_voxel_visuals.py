@@ -11,6 +11,7 @@ from open_world_rpg.ui.voxel import (
     BlockType,
     FaceTexture,
     PlayerState,
+    RayHit,
     SceneryKind,
     VoxelHudSnapshot,
     atlas_uv,
@@ -18,7 +19,7 @@ from open_world_rpg.ui.voxel import (
     scenery_at,
     select_spawn,
 )
-from open_world_rpg.ui.voxel.meshing import side_texture, top_texture
+from open_world_rpg.ui.voxel.meshing import _material_texture, side_texture, top_texture
 from open_world_rpg.ui.voxel.texture_atlas import ATLAS_SIZE
 
 
@@ -38,6 +39,7 @@ def test_texture_atlas_is_complete_crisp_and_deterministic() -> None:
     assert len({atlas_uv(texture) for texture in FaceTexture}) == len(FaceTexture)
     assert top_texture(BlockType.GRASS) is FaceTexture.GRASS_TOP
     assert top_texture(BlockType.WATER) is FaceTexture.SHALLOW_WATER
+    assert _material_texture(BlockType.SNOW, top=False) is FaceTexture.SNOW_SIDE
     with pytest.raises(TypeError):
         atlas_uv("grass")  # type: ignore[arg-type]
 
@@ -178,13 +180,30 @@ def test_hud_snapshot_projects_negative_coordinates_and_modes() -> None:
         mesh_count=4,
         triangles=123,
         render_distance=2,
-        target=None,
+        target=RayHit(
+            x=-1,
+            y=14,
+            z=-17,
+            distance=1.0,
+            material=BlockType.STONE,
+            face_normal=(0, 1, 0),
+        ),
         loading=True,
+        selected_material=BlockType.DIRT,
+        edit_revision=4,
+        edited_block_count=3,
+        last_interaction="block placed",
     )
     assert snapshot.block == (-1, 14, -17)
     assert (snapshot.chunk.x, snapshot.chunk.y) == (-1, -2)
     assert snapshot.mode == "FLY"
     assert snapshot.loading
+    assert snapshot.target_material is BlockType.STONE
+    assert snapshot.target_face == (0, 1, 0)
+    assert snapshot.selected_material is BlockType.DIRT
+    assert snapshot.edit_revision == 4
+    assert snapshot.edited_block_count == 3
+    assert snapshot.last_interaction == "block placed"
 
 
 def test_mesh_vertex_layout_has_upward_top_face_winding() -> None:

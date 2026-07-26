@@ -18,10 +18,13 @@ import pygame
 from open_world_rpg.application import create_terrain_runtime
 from open_world_rpg.world import (
     CHUNK_SIZE,
+    BlockEditStore,
+    BlockMaterial,
     ChunkCoordinate,
     ChunkState,
     LocalTileCoordinate,
     TerrainGenerationConfig,
+    WorldBlockCoordinate,
     WorldId,
     WorldModel,
     WorldSeed,
@@ -31,7 +34,10 @@ from open_world_rpg.world import (
 from .blocks import BlockColumn, column_from_terrain
 from .camera import FirstPersonCamera, PlayerState
 from .collision import RayHit, move_player, ray_cast, safe_spawn_height
+from .editable_world import EditableVoxelWorld
+from .hotbar import VoxelHotbar
 from .hud import VoxelHudSnapshot
+from .interaction import InteractionOutcome, InteractionResult, VoxelInteractionController
 from .meshing import VoxelChunkMesh, build_chunk_mesh, mesh_cache_key
 from .scenery import scenery_at
 from .shaders import (
@@ -48,7 +54,13 @@ from .shaders import (
 )
 from .spawn import select_spawn
 from .streaming import streaming_chunks
-from .texture_atlas import ATLAS_SIZE, generate_texture_atlas
+from .texture_atlas import (
+    ATLAS_COLUMNS,
+    ATLAS_SIZE,
+    ATLAS_TILE_SIZE,
+    FaceTexture,
+    generate_texture_atlas,
+)
 
 
 class VoxelPrototypeError(RuntimeError):
@@ -69,9 +81,27 @@ class VoxelPrototypeConfig:
     render_distance: int = 1
     world_seed: int = 0
     hidden_window: bool = False
+    interaction_reach: float = 5.5
+    break_cooldown: float = 0.18
+    placement_cooldown: float = 0.18
     terrain_config: TerrainGenerationConfig = field(
         default_factory=lambda: TerrainGenerationConfig(octave_count=2)
     )
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("interaction_reach", self.interaction_reach),
+            ("break_cooldown", self.break_cooldown),
+            ("placement_cooldown", self.placement_cooldown),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite.")
+        if self.interaction_reach <= 0:
+            raise ValueError("interaction_reach must be greater than zero.")
+        if self.break_cooldown < 0 or self.placement_cooldown < 0:
+            raise ValueError("interaction cooldowns must be non-negative.")
 
 
 @dataclass(slots=True)
@@ -183,6 +213,19 @@ class VoxelPrototypeApplication:
             world_id=WorldId(value=UUID(int=1)),
         )
         self.runtime = create_terrain_runtime(world=world, config=self.config.terrain_config)
+        self.edits = BlockEditStore()
+        self.editable_world = EditableVoxelWorld(column_at=self._column_at, edits=self.edits)
+        self.interactions = VoxelInteractionController(
+            world=self.editable_world,
+            edits=self.edits,
+            break_cooldown=self.config.break_cooldown,
+            placement_cooldown=self.config.placement_cooldown,
+        )
+        self.hotbar = VoxelHotbar()
+        self.last_interaction = InteractionResult.NONE
+        self._selection_changed_at = float("-inf")
+        self._feedback_until = 0.0
+        self._feedback_coordinate: WorldBlockCoordinate | None = None
         self.camera = FirstPersonCamera(yaw_degrees=25.0, pitch_degrees=-12.0)
         self.player = PlayerState(x=8.0, y=20.0, z=8.0)
         self.spawn_x = 8
@@ -270,28 +313,28 @@ class VoxelPrototypeApplication:
             hud_quad = array(
                 "f",
                 (
-                    -0.98,
-                    0.98,
-                    0.0,
-                    1.0,
-                    -0.98,
-                    0.28,
-                    0.0,
-                    0.0,
-                    -0.20,
-                    0.28,
+                    -1.0,
                     1.0,
                     0.0,
-                    -0.98,
-                    0.98,
+                    1.0,
+                    -1.0,
+                    -1.0,
+                    0.0,
                     0.0,
                     1.0,
-                    -0.20,
-                    0.28,
+                    -1.0,
                     1.0,
                     0.0,
-                    -0.20,
-                    0.98,
+                    -1.0,
+                    1.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    -1.0,
+                    1.0,
+                    0.0,
+                    1.0,
+                    1.0,
                     1.0,
                     1.0,
                 ),
@@ -301,7 +344,7 @@ class VoxelPrototypeApplication:
                 self._hud_program,
                 [(self._hud_buffer, "2f 2f", "in_position", "in_uv")],
             )
-            self._hud_texture = self.context.texture((512, 256), 4)
+            self._hud_texture = self.context.texture((1024, 512), 4)
             self._hud_texture.filter = moderngl.NEAREST, moderngl.NEAREST
             self._hud_texture.use(location=1)
             cast(moderngl.Uniform, self._hud_program["hud_texture"]).value = 1
@@ -427,8 +470,34 @@ class VoxelPrototypeApplication:
                     self.render_distance = min(4, self.render_distance + 1)
                     self._stream_signature = None
                     self._stream()
-            elif event.type == pygame.MOUSEBUTTONDOWN and not self.mouse_captured:
-                self._capture_mouse(True)
+                elif pygame.K_1 <= event.key <= pygame.K_9:
+                    self.hotbar = self.hotbar.select(event.key - pygame.K_1 + 1)
+                    self._selection_changed_at = pygame.time.get_ticks() / 1000.0
+            elif event.type == pygame.MOUSEWHEEL:
+                self.hotbar = self.hotbar.cycle(event.y)
+                self._selection_changed_at = pygame.time.get_ticks() / 1000.0
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if not self.mouse_captured:
+                    self._capture_mouse(True)
+                elif event.button in (4, 5):
+                    self.hotbar = self.hotbar.cycle(1 if event.button == 4 else -1)
+                    self._selection_changed_at = pygame.time.get_ticks() / 1000.0
+                elif event.button == 1:
+                    self._apply_interaction(
+                        self.interactions.break_block(
+                            target=self.target,
+                            now=pygame.time.get_ticks() / 1000.0,
+                        )
+                    )
+                elif event.button == 3:
+                    self._apply_interaction(
+                        self.interactions.place_block(
+                            target=self.target,
+                            material=self.hotbar.selected_material,
+                            player=self.player,
+                            now=pygame.time.get_ticks() / 1000.0,
+                        )
+                    )
 
     def update(self, delta_seconds: float) -> None:
         """Apply first-person motion, physics, targeting, and streaming."""
@@ -449,6 +518,7 @@ class VoxelPrototypeApplication:
             delta_z=delta_z,
             delta_seconds=delta_seconds,
             height_at=self._height_at,
+            solid_at=self._solid_at,
             jump=bool(keys[pygame.K_SPACE]),
         )
         if self.player.flying:
@@ -463,7 +533,8 @@ class VoxelPrototypeApplication:
         self.target = ray_cast(
             origin=(self.player.x, self.player.y + 1.62, self.player.z),
             direction=self.camera.forward,
-            solid_at=self._solid_at,
+            block_at=self.editable_world.material_at,
+            maximum_distance=self.config.interaction_reach,
         )
 
     def render(self) -> None:
@@ -517,6 +588,18 @@ class VoxelPrototypeApplication:
         cast(Any, self.context).depth_mask = True
         if self.target is not None:
             self._render_target_outline(self.target)
+        if (
+            self._feedback_coordinate is not None
+            and pygame.time.get_ticks() / 1000.0 < self._feedback_until
+        ):
+            self._render_target_outline(
+                RayHit(
+                    x=self._feedback_coordinate.x,
+                    y=self._feedback_coordinate.y,
+                    z=self._feedback_coordinate.z,
+                    distance=0.0,
+                )
+            )
         if self._crosshair_array is not None:
             self.context.disable(moderngl.DEPTH_TEST)
             self._crosshair_array.render(moderngl.LINES)
@@ -626,7 +709,11 @@ class VoxelPrototypeApplication:
                     if cached is not None:
                         cached.release()
                     mesh_start = time.perf_counter()
-                    mesh = build_chunk_mesh(terrain=terrain, column_at_world=self._column_at)
+                    mesh = build_chunk_mesh(
+                        terrain=terrain,
+                        column_at_world=self._column_at,
+                        block_at_world=self.editable_world.material_at,
+                    )
                     self._mesh_seconds += time.perf_counter() - mesh_start
                     opaque_buffer = self.context.buffer(mesh.opaque_vertices)
                     opaque_array = self.context.vertex_array(
@@ -687,7 +774,28 @@ class VoxelPrototypeApplication:
         return self._column_at(world_x, world_z).ground_height
 
     def _solid_at(self, world_x: int, world_y: int, world_z: int) -> bool:
-        return world_y <= self._height_at(world_x, world_z)
+        return self.editable_world.solid_at(world_x, world_y, world_z)
+
+    def _apply_interaction(self, outcome: InteractionOutcome) -> None:
+        self.last_interaction = outcome.result
+        if not outcome.changed:
+            if outcome.result is InteractionResult.PLAYER_INTERSECTION:
+                self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+            return
+        self._feedback_coordinate = outcome.coordinate
+        self._feedback_until = pygame.time.get_ticks() / 1000.0 + 0.22
+        for coordinate in outcome.invalidated_chunks:
+            cached = self._gpu_chunks.pop(coordinate, None)
+            if cached is not None:
+                cached.release()
+        self._stream_signature = None
+        self._stream()
+        self.target = ray_cast(
+            origin=(self.player.x, self.player.y + 1.62, self.player.z),
+            direction=self.camera.forward,
+            block_at=self.editable_world.material_at,
+            maximum_distance=self.config.interaction_reach,
+        )
 
     def _has_scenery(self, world_x: int, world_z: int) -> bool:
         coordinate = ChunkCoordinate(
@@ -812,6 +920,10 @@ class VoxelPrototypeApplication:
             render_distance=self.render_distance,
             target=self.target,
             loading=self.loading,
+            selected_material=self.hotbar.selected_material,
+            edit_revision=self.edits.revision,
+            edited_block_count=len(self.edits),
+            last_interaction=self.last_interaction.value,
         )
         hud = self.hud_snapshot
         lines = [f"{hud.fps:4.0f} FPS"]
@@ -826,18 +938,84 @@ class VoxelPrototypeApplication:
                     f"Active/cached {hud.active_chunks}/{hud.cached_chunks}",
                     f"Meshes {hud.mesh_count}  Triangles {hud.triangles}",
                     f"Mode {hud.mode}  Radius {hud.render_distance}",
-                    f"Target {hud.target or 'none'}",
+                    f"Selected {hud.selected_material.value if hud.selected_material else 'empty'}",
+                    f"Target {hud.target or 'none'} "
+                    f"{hud.target_material.value if hud.target_material else ''} "
+                    f"face {hud.target_face or 'none'}",
+                    f"Edits {hud.edited_block_count}  Revision {hud.edit_revision}",
+                    f"Interaction {hud.last_interaction}",
                 )
             )
-        surface = pygame.Surface((512, 256), pygame.SRCALPHA)
+        surface = pygame.Surface((1024, 512), pygame.SRCALPHA)
         surface.fill((8, 13, 20, 175), pygame.Rect(0, 0, 500, len(lines) * 22 + 12))
         for index, line in enumerate(lines):
             surface.blit(
                 self._font.render(line, True, (235, 240, 235)),
                 (8, 6 + index * 22),
             )
+        self._draw_hotbar(surface)
         self._hud_texture.write(pygame.image.tobytes(surface, "RGBA", True))
         self.context.disable(moderngl.DEPTH_TEST)
         self._hud_texture.use(location=1)
         self._hud_array.render(moderngl.TRIANGLES)
         self.context.enable(moderngl.DEPTH_TEST)
+
+    def _draw_hotbar(self, surface: pygame.Surface) -> None:
+        if self._font is None:
+            return
+        font = self._font
+        atlas = pygame.image.frombytes(
+            generate_texture_atlas(),
+            (ATLAS_SIZE, ATLAS_SIZE),
+            "RGBA",
+        )
+        icon_for = {
+            BlockMaterial.GRASS: FaceTexture.GRASS_TOP,
+            BlockMaterial.DIRT: FaceTexture.DIRT,
+            BlockMaterial.STONE: FaceTexture.STONE,
+            BlockMaterial.SAND: FaceTexture.SAND,
+            BlockMaterial.SNOW: FaceTexture.SNOW_TOP,
+        }
+        slot_size = 46
+        gap = 4
+        total_width = len(self.hotbar.slots) * slot_size + (len(self.hotbar.slots) - 1) * gap
+        start_x = (surface.get_width() - total_width) // 2
+        y = surface.get_height() - slot_size - 18
+        for index, material in enumerate(self.hotbar.slots):
+            rect = pygame.Rect(start_x + index * (slot_size + gap), y, slot_size, slot_size)
+            is_selected = index == self.hotbar.selected_index
+            pygame.draw.rect(
+                surface,
+                (232, 204, 92, 235) if is_selected else (24, 29, 34, 215),
+                rect,
+            )
+            pygame.draw.rect(
+                surface,
+                (255, 244, 174) if is_selected else (122, 132, 137),
+                rect,
+                3,
+            )
+            if material is not None:
+                texture = icon_for[material]
+                atlas_index = tuple(FaceTexture).index(texture)
+                source = pygame.Rect(
+                    atlas_index % ATLAS_COLUMNS * ATLAS_TILE_SIZE,
+                    atlas_index // ATLAS_COLUMNS * ATLAS_TILE_SIZE,
+                    ATLAS_TILE_SIZE,
+                    ATLAS_TILE_SIZE,
+                )
+                icon = pygame.transform.scale(atlas.subsurface(source), (34, 34))
+                surface.blit(icon, (rect.x + 6, rect.y + 6))
+            number = font.render(str(index + 1), True, (245, 245, 245))
+            surface.blit(number, (rect.x + 3, rect.y + 1))
+        now = pygame.time.get_ticks() / 1000.0
+        selected_material = self.hotbar.selected_material
+        if selected_material is not None and now - self._selection_changed_at < 1.4:
+            label = font.render(selected_material.value.upper(), True, (255, 245, 190))
+            surface.blit(label, (surface.get_width() // 2 - label.get_width() // 2, y - 24))
+        if now < self._feedback_until:
+            feedback = font.render(self.last_interaction.value, True, (255, 218, 145))
+            surface.blit(
+                feedback,
+                (surface.get_width() // 2 - feedback.get_width() // 2, y - 46),
+            )

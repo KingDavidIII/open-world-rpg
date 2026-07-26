@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Final
 
-from open_world_rpg.world import TerrainType
+from open_world_rpg.world import BlockMaterial, TerrainType
 
 ELEVATION_METRES_PER_BLOCK: Final = 30
 HIGH_ELEVATION_METRES_PER_BLOCK: Final = 45
@@ -17,16 +16,7 @@ MAX_DISPLAY_HEIGHT: Final = 64
 SNOW_HEIGHT: Final = 48
 
 
-class BlockType(StrEnum):
-    """UI-side material identities; these are not persisted terrain data."""
-
-    DEEP_WATER = "deep_water"
-    WATER = "water"
-    SAND = "sand"
-    GRASS = "grass"
-    DIRT = "dirt"
-    STONE = "stone"
-    SNOW = "snow"
+BlockType = BlockMaterial
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -74,7 +64,7 @@ def column_from_terrain(
             surface_height=DISPLAY_SEA_LEVEL,
             surface=BlockType.STONE,
             subsurface=BlockType.STONE,
-            water=BlockType.DEEP_WATER,
+            water=BlockType.WATER,
         )
     if terrain_type is TerrainType.SHALLOW_WATER:
         return BlockColumn(
