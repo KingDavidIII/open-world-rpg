@@ -76,6 +76,7 @@ from open_world_rpg.world.terrain import (
     TerrainTile,
     TerrainType,
 )
+from open_world_rpg.world.terrain_generator import DeterministicTerrainGenerator
 from open_world_rpg.world.terrain_sampler import (
     TERRAIN_SAMPLER_DIGEST_BITS,
     TERRAIN_SAMPLER_FIXED_POINT_BITS,
@@ -133,6 +134,7 @@ __all__ = [
     "ChunkTerrain",
     "ChunkTerrainSnapshot",
     "ChunkTransitionError",
+    "DeterministicTerrainGenerator",
     "DeterministicTerrainSampler",
     "DuplicateTerrainCoordinateError",
     "IncompatibleTerrainDimensionsError",
