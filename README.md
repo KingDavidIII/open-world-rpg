@@ -8,24 +8,29 @@ gameplay systems, and persistent save support.
 
 ## Current milestone
 
-**v0.4.0 - World Foundation**
+**v0.5.0 - Procedural Terrain Foundation**
 
-The world foundation includes:
+The procedural terrain foundation includes:
 
-- Deterministic world, chunk, region, and local coordinate models
-- Negative-coordinate-safe spatial conversion
-- World identity, metadata, and lifecycle
-- Deterministic integer-only world calendar and clock
-- Stable BLAKE2b generation keys for regions and chunks
-- Immutable WorldSpecification and WorldModel aggregate
-- Controlled WorldRuntime mutation and revision tracking
-- World lifecycle and time events
-- Engine-integrated WorldSubsystem
-- Region and chunk lifecycle metadata
-- Deterministic RegionChunkIndex ordering and boundaries
-- Structured world diagnostics
-- End-to-end application, engine, and world acceptance coverage
-- 1,091 passing tests with 100% statement and branch coverage
+- Immutable terrain elevation, tile and chunk payload contracts
+- Deterministic terrain configuration and classification
+- Fixed-point BLAKE2b terrain sampling
+- Deterministic complete chunk generation
+- Terrain repository and generation service
+- Controlled TerrainRuntime lifecycle and events
+- Terrain diagnostics and end-to-end acceptance coverage
+- Retained top-down terrain debug map
+- First-person ModernGL voxel prototype
+- Chunk streaming and GPU mesh caching
+- Hidden-face and chunk-boundary culling
+- Procedural pixel-art texture atlas
+- Grass, dirt, stone, sand, snow and water strata
+- Deterministic trees, shrubs, rocks and grass details
+- First-person camera, collision, jumping and flying
+- Sky, fog, sun, water animation and in-window HUD
+- Adjustable render distance
+- 1,542 passing tests
+- 100% statement and branch coverage
 
 ## Requirements
 
