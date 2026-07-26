@@ -3,6 +3,8 @@
 from open_world_rpg.persistence.document import (
     CURRENT_SAVE_SCHEMA_VERSION,
     JsonValue,
+    PersistedBlockEdit,
+    PersistedBlockEditOverlay,
     SaveCompatibilityError,
     SaveCorruptionError,
     SaveDocument,
@@ -32,6 +34,8 @@ __all__ = [
     "MAX_SAVE_SLOT_LENGTH",
     "SAVE_FILE_SUFFIX",
     "JsonValue",
+    "PersistedBlockEdit",
+    "PersistedBlockEditOverlay",
     "RuntimeStorage",
     "SaveCompatibilityError",
     "SaveCorruptionError",

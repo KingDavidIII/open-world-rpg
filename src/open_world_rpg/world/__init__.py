@@ -1,5 +1,12 @@
 """Deterministic world geometry and spatial value objects."""
 
+from open_world_rpg.world.blocks import (
+    BlockEdit,
+    BlockEditStore,
+    BlockEditStoreSnapshot,
+    BlockMaterial,
+    WorldBlockCoordinate,
+)
 from open_world_rpg.world.coordinates import (
     CHUNK_SIZE,
     REGION_SIZE_IN_CHUNKS,
@@ -162,6 +169,10 @@ __all__ = [
     "TERRAIN_SAMPLER_FIXED_POINT_ONE",
     "TERRAIN_SAMPLER_NAMESPACE",
     "TERRAIN_SAMPLER_VERSION",
+    "BlockEdit",
+    "BlockEditStore",
+    "BlockEditStoreSnapshot",
+    "BlockMaterial",
     "ChunkCoordinate",
     "ChunkGenerationKey",
     "ChunkMetadata",
@@ -232,6 +243,7 @@ __all__ = [
     "TerrainUnavailableError",
     "UnsupportedTerrainGenerationConfigError",
     "UnsupportedWorldSpecificationError",
+    "WorldBlockCoordinate",
     "WorldClock",
     "WorldClockSnapshot",
     "WorldDateTime",

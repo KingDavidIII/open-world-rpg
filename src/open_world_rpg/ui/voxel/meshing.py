@@ -6,14 +6,21 @@ from array import array
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from open_world_rpg.world import ChunkCoordinate, ChunkTerrain
+from open_world_rpg.world import (
+    CHUNK_SIZE,
+    BlockMaterial,
+    ChunkCoordinate,
+    ChunkTerrain,
+)
 
-from .blocks import BlockColumn, BlockType, column_from_terrain
+from .blocks import MAX_DISPLAY_HEIGHT, BlockColumn, BlockType, column_from_terrain
 from .scenery import SceneryKind, scenery_at
 from .texture_atlas import FaceTexture, atlas_uv
 
 ColumnLookup = Callable[[int, int], BlockColumn]
+BlockLookup = Callable[[int, int, int], BlockMaterial]
 Point = tuple[float, float, float]
+FaceBuilder = Callable[[int, int, int], tuple[Point, Point, Point, Point]]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -49,7 +56,6 @@ def mesh_cache_key(
 def top_texture(block: BlockType) -> FaceTexture:
     """Select the atlas cell used for one upward face."""
     return {
-        BlockType.DEEP_WATER: FaceTexture.DEEP_WATER,
         BlockType.WATER: FaceTexture.SHALLOW_WATER,
         BlockType.SAND: FaceTexture.SAND,
         BlockType.GRASS: FaceTexture.GRASS_TOP,
@@ -57,6 +63,19 @@ def top_texture(block: BlockType) -> FaceTexture:
         BlockType.STONE: FaceTexture.STONE,
         BlockType.SNOW: FaceTexture.SNOW_TOP,
     }[block]
+
+
+def _material_texture(material: BlockMaterial, *, top: bool) -> FaceTexture:
+    if material is BlockMaterial.GRASS:
+        return FaceTexture.GRASS_TOP if top else FaceTexture.GRASS_SIDE
+    if material is BlockMaterial.SNOW:
+        return FaceTexture.SNOW_TOP if top else FaceTexture.SNOW_SIDE
+    return {
+        BlockMaterial.DIRT: FaceTexture.DIRT,
+        BlockMaterial.STONE: FaceTexture.STONE,
+        BlockMaterial.SAND: FaceTexture.SAND,
+        BlockMaterial.WATER: FaceTexture.SHALLOW_WATER,
+    }[material]
 
 
 def side_texture(*, column: BlockColumn, block_y: int) -> FaceTexture:
@@ -194,10 +213,21 @@ def _add_scenery(
             )
 
 
-def build_chunk_mesh(*, terrain: ChunkTerrain, column_at_world: ColumnLookup) -> VoxelChunkMesh:
+def build_chunk_mesh(
+    *,
+    terrain: ChunkTerrain,
+    column_at_world: ColumnLookup,
+    block_at_world: BlockLookup | None = None,
+) -> VoxelChunkMesh:
     """Build opaque terrain first and water into an independent blend stream."""
     if not isinstance(terrain, ChunkTerrain):
         raise TypeError("terrain must be a ChunkTerrain.")
+    if block_at_world is not None:
+        return _build_editable_chunk_mesh(
+            terrain=terrain,
+            column_at_world=column_at_world,
+            block_at_world=block_at_world,
+        )
     opaque = array("f")
     water = array("f")
     origin = terrain.chunk_coordinate.to_world_origin()
@@ -287,6 +317,132 @@ def build_chunk_mesh(*, terrain: ChunkTerrain, column_at_world: ColumnLookup) ->
                 y=column.ground_height,
                 z=world_z,
             )
+    opaque_count = len(opaque) // 6
+    water_count = len(water) // 6
+    return VoxelChunkMesh(
+        coordinate=terrain.chunk_coordinate,
+        opaque_vertices=opaque.tobytes(),
+        water_vertices=water.tobytes(),
+        opaque_vertex_count=opaque_count,
+        water_vertex_count=water_count,
+        triangle_count=(opaque_count + water_count) // 3,
+        terrain_revision=terrain.revision,
+    )
+
+
+def _build_editable_chunk_mesh(
+    *,
+    terrain: ChunkTerrain,
+    column_at_world: ColumnLookup,
+    block_at_world: BlockLookup,
+) -> VoxelChunkMesh:
+    """Mesh the authoritative edited block resolver with hidden-face culling."""
+    opaque = array("f")
+    water = array("f")
+    origin = terrain.chunk_coordinate.to_world_origin()
+    faces: tuple[tuple[tuple[int, int, int], float, FaceBuilder], ...] = (
+        (
+            (-1, 0, 0),
+            0.72,
+            lambda x, y, z: ((x, y, z + 1), (x, y + 1, z + 1), (x, y + 1, z), (x, y, z)),
+        ),
+        (
+            (1, 0, 0),
+            0.88,
+            lambda x, y, z: (
+                (x + 1, y, z),
+                (x + 1, y + 1, z),
+                (x + 1, y + 1, z + 1),
+                (x + 1, y, z + 1),
+            ),
+        ),
+        (
+            (0, 0, -1),
+            0.96,
+            lambda x, y, z: ((x, y, z), (x, y + 1, z), (x + 1, y + 1, z), (x + 1, y, z)),
+        ),
+        (
+            (0, 0, 1),
+            0.66,
+            lambda x, y, z: (
+                (x + 1, y, z + 1),
+                (x + 1, y + 1, z + 1),
+                (x, y + 1, z + 1),
+                (x, y, z + 1),
+            ),
+        ),
+        (
+            (0, 1, 0),
+            1.08,
+            lambda x, y, z: (
+                (x, y + 1, z),
+                (x, y + 1, z + 1),
+                (x + 1, y + 1, z + 1),
+                (x + 1, y + 1, z),
+            ),
+        ),
+        (
+            (0, -1, 0),
+            0.58,
+            lambda x, y, z: ((x, y, z + 1), (x, y, z), (x + 1, y, z), (x + 1, y, z + 1)),
+        ),
+    )
+    for local_z in range(CHUNK_SIZE):
+        for local_x in range(CHUNK_SIZE):
+            world_x = origin.x + local_x
+            world_z = origin.y + local_z
+            column = column_at_world(world_x, world_z)
+            highest = max(column.surface_height, column.ground_height, MAX_DISPLAY_HEIGHT)
+            for y in range(0, highest + 1):
+                material = block_at_world(world_x, y, world_z)
+                if material is BlockMaterial.AIR:
+                    continue
+                output = water if material is BlockMaterial.WATER else opaque
+                for (dx, dy, dz), shade, points_at in faces:
+                    neighbour = block_at_world(world_x + dx, y + dy, world_z + dz)
+                    visible = (
+                        neighbour is BlockMaterial.AIR
+                        if material is BlockMaterial.WATER
+                        else neighbour in (BlockMaterial.AIR, BlockMaterial.WATER)
+                    )
+                    if visible:
+                        _quad(
+                            output,
+                            points=points_at(world_x, y, world_z),
+                            texture=_material_texture(material, top=dy > 0),
+                            shade=shade,
+                        )
+            surface_material = block_at_world(world_x, column.ground_height, world_z)
+            above_material = block_at_world(world_x, column.ground_height + 1, world_z)
+            differences = (
+                abs(
+                    column_at_world(world_x - 1, world_z).ground_height
+                    - column_at_world(world_x + 1, world_z).ground_height
+                ),
+                abs(
+                    column_at_world(world_x, world_z - 1).ground_height
+                    - column_at_world(world_x, world_z + 1).ground_height
+                ),
+            )
+            scenery = (
+                scenery_at(
+                    seed=terrain.terrain_seed,
+                    world_x=world_x,
+                    world_z=world_z,
+                    column=column,
+                    slope=max(differences),
+                )
+                if surface_material is column.surface and above_material is BlockMaterial.AIR
+                else None
+            )
+            if scenery is not None:
+                _add_scenery(
+                    opaque,
+                    kind=scenery.kind,
+                    x=world_x,
+                    y=column.ground_height + 1,
+                    z=world_z,
+                )
     opaque_count = len(opaque) // 6
     water_count = len(water) // 6
     return VoxelChunkMesh(

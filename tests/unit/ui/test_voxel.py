@@ -13,6 +13,7 @@ from open_world_rpg.ui.voxel import (
     DISPLAY_SEA_LEVEL,
     BlockColumn,
     BlockType,
+    EditableVoxelWorld,
     FirstPersonCamera,
     PlayerState,
     build_chunk_mesh,
@@ -27,9 +28,12 @@ from open_world_rpg.ui.voxel import (
 from open_world_rpg.ui.voxel.blocks import elevation_to_height
 from open_world_rpg.world import (
     CHUNK_SIZE,
+    BlockEditStore,
+    BlockMaterial,
     ChunkCoordinate,
     TerrainGenerationConfig,
     TerrainType,
+    WorldBlockCoordinate,
     WorldSeed,
     WorldSpecification,
 )
@@ -48,7 +52,7 @@ def test_elevation_display_scale_is_bounded_and_negative_safe() -> None:
 @pytest.mark.parametrize(
     ("terrain_type", "expected_surface", "water"),
     [
-        (TerrainType.DEEP_WATER, BlockType.STONE, BlockType.DEEP_WATER),
+        (TerrainType.DEEP_WATER, BlockType.STONE, BlockType.WATER),
         (TerrainType.SHALLOW_WATER, BlockType.SAND, BlockType.WATER),
         (TerrainType.COAST, BlockType.SAND, None),
         (TerrainType.PLAINS, BlockType.GRASS, None),
@@ -178,7 +182,9 @@ def test_streaming_is_row_major_and_supports_negative_coordinates() -> None:
         streaming_chunks(world_x=0, world_z=0, render_distance=-1)
 
 
-def test_mesh_is_deterministic_compact_and_cache_key_tracks_neighbours() -> None:
+def test_mesh_is_deterministic_compact_and_cache_key_tracks_neighbours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = create_terrain_runtime(
         world=WorldSpecification(name="Voxel", seed=WorldSeed(value=3)),
         config=TerrainGenerationConfig(octave_count=1),
@@ -232,3 +238,57 @@ def test_mesh_is_deterministic_compact_and_cache_key_tracks_neighbours() -> None
         build_chunk_mesh(terrain=cast(Any, object()), column_at_world=column_at)
     with pytest.raises(FrozenInstanceError):
         mesh.opaque_vertex_count = 0  # type: ignore[misc]
+
+    edits = BlockEditStore()
+    editable = EditableVoxelWorld(column_at=column_at, edits=edits)
+    editable_mesh = build_chunk_mesh(
+        terrain=terrain,
+        column_at_world=column_at,
+        block_at_world=editable.material_at,
+    )
+    origin = terrain.chunk_coordinate.to_world_origin()
+    surface = WorldBlockCoordinate(
+        x=origin.x,
+        y=column_at(origin.x, origin.y).ground_height,
+        z=origin.y,
+    )
+    edits.set_block(surface, BlockMaterial.AIR)
+    removed_mesh = build_chunk_mesh(
+        terrain=terrain,
+        column_at_world=column_at,
+        block_at_world=editable.material_at,
+    )
+    assert removed_mesh != editable_mesh
+    placed = surface.offset(y=2)
+    edits.set_block(placed, BlockMaterial.STONE)
+    placed_mesh = build_chunk_mesh(
+        terrain=terrain,
+        column_at_world=column_at,
+        block_at_world=editable.material_at,
+    )
+    assert placed_mesh.opaque_vertex_count > removed_mesh.opaque_vertex_count
+
+    from open_world_rpg.ui.voxel import SceneryKind, SceneryPlacement
+    from open_world_rpg.ui.voxel import meshing as meshing_module
+
+    monkeypatch.setattr(
+        meshing_module,
+        "column_from_terrain",
+        lambda **_kwargs: low_column,
+    )
+    monkeypatch.setattr(
+        meshing_module,
+        "scenery_at",
+        lambda **_kwargs: SceneryPlacement(
+            kind=SceneryKind.ROCK,
+            world_x=origin.x,
+            world_z=origin.y,
+            height=1,
+        ),
+    )
+    scenery_mesh = build_chunk_mesh(
+        terrain=terrain,
+        column_at_world=lambda _x, _z: low_column,
+    )
+    assert scenery_mesh.water_vertex_count == 0
+    assert scenery_mesh.opaque_vertex_count > CHUNK_SIZE * CHUNK_SIZE * 6
