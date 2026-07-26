@@ -77,6 +77,17 @@ from open_world_rpg.world.terrain import (
     TerrainType,
 )
 from open_world_rpg.world.terrain_generator import DeterministicTerrainGenerator
+from open_world_rpg.world.terrain_repository import (
+    IncompatibleTerrainRepositoryScopeError,
+    InMemoryTerrainRepository,
+    TerrainMissingError,
+    TerrainRepository,
+    TerrainRepositoryAccessError,
+    TerrainRepositoryConflictError,
+    TerrainRepositoryError,
+    TerrainRepositoryScope,
+    TerrainRepositorySnapshot,
+)
 from open_world_rpg.world.terrain_sampler import (
     TERRAIN_SAMPLER_DIGEST_BITS,
     TERRAIN_SAMPLER_FIXED_POINT_BITS,
@@ -97,6 +108,12 @@ from open_world_rpg.world.terrain_sampling import (
     TerrainSamplerExecutionError,
     TerrainSamplingError,
     UnsupportedTerrainGenerationConfigError,
+)
+from open_world_rpg.world.terrain_service import (
+    TerrainAlreadyGeneratedError,
+    TerrainGenerationService,
+    TerrainGenerationServiceError,
+    TerrainGenerationServiceSnapshot,
 )
 from open_world_rpg.world.time import (
     WorldClock,
@@ -137,7 +154,9 @@ __all__ = [
     "DeterministicTerrainGenerator",
     "DeterministicTerrainSampler",
     "DuplicateTerrainCoordinateError",
+    "InMemoryTerrainRepository",
     "IncompatibleTerrainDimensionsError",
+    "IncompatibleTerrainRepositoryScopeError",
     "IncompleteTerrainCoverageError",
     "InconsistentWorldModelError",
     "InvalidTerrainPayloadError",
@@ -152,12 +171,23 @@ __all__ = [
     "RegionSnapshot",
     "RegionState",
     "RegionTransitionError",
+    "TerrainAlreadyGeneratedError",
     "TerrainClassifier",
     "TerrainElevation",
     "TerrainGenerationConfig",
     "TerrainGenerationError",
+    "TerrainGenerationService",
+    "TerrainGenerationServiceError",
+    "TerrainGenerationServiceSnapshot",
     "TerrainGenerator",
     "TerrainGeneratorExecutionError",
+    "TerrainMissingError",
+    "TerrainRepository",
+    "TerrainRepositoryAccessError",
+    "TerrainRepositoryConflictError",
+    "TerrainRepositoryError",
+    "TerrainRepositoryScope",
+    "TerrainRepositorySnapshot",
     "TerrainSampleCoordinate",
     "TerrainSampler",
     "TerrainSamplerExecutionError",
