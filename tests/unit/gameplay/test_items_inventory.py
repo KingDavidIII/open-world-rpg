@@ -12,6 +12,7 @@ from open_world_rpg.gameplay import (
     ItemType,
     PlayerInventory,
     PlayerInventorySnapshot,
+    ToolInstance,
     create_bootstrap_inventory,
     item_for_material,
     material_for_item,
@@ -26,6 +27,10 @@ def test_item_values_display_and_block_mapping() -> None:
         "stone_block",
         "sand_block",
         "snow_block",
+        "wooden_pickaxe",
+        "stone_pickaxe",
+        "wooden_shovel",
+        "stone_shovel",
     )
     assert ItemType.GRASS_BLOCK.display_name == "Grass Block"
     for material, item in zip(
@@ -36,7 +41,7 @@ def test_item_values_display_and_block_mapping() -> None:
             BlockMaterial.SAND,
             BlockMaterial.SNOW,
         ),
-        ItemType,
+        tuple(ItemType)[:5],
         strict=True,
     ):
         assert item_for_material(material) is item
@@ -113,12 +118,14 @@ def test_inventory_full_remainder_contains_clear_and_revision() -> None:
 
 def test_inventory_selection_snapshot_restore_and_noops() -> None:
     inventory = create_bootstrap_inventory()
-    assert [inventory.slot(index).quantity for index in range(5)] == [8, 8, 8, 4, 4]  # type: ignore[union-attr]
+    assert inventory.slot(0) == ToolInstance.create(ItemType.WOODEN_PICKAXE)
+    assert inventory.slot(1) == ToolInstance.create(ItemType.WOODEN_SHOVEL)
+    assert [inventory.slot(index).quantity for index in range(2, 7)] == [8, 8, 8, 4, 4]  # type: ignore[union-attr]
     revision = inventory.revision
     assert not inventory.select_hotbar(0)
     assert inventory.revision == revision
     assert inventory.select_hotbar(2)
-    assert inventory.selected_stack == ItemStack(item=ItemType.STONE_BLOCK, quantity=8)
+    assert inventory.selected_stack == ItemStack(item=ItemType.GRASS_BLOCK, quantity=8)
     assert inventory.cycle_hotbar(1)
     assert inventory.selected_hotbar_index == 1
     assert inventory.cycle_hotbar(-1)
