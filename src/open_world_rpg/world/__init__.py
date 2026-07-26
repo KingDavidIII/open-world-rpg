@@ -76,6 +76,14 @@ from open_world_rpg.world.terrain import (
     TerrainTile,
     TerrainType,
 )
+from open_world_rpg.world.terrain_sampler import (
+    TERRAIN_SAMPLER_DIGEST_BITS,
+    TERRAIN_SAMPLER_FIXED_POINT_BITS,
+    TERRAIN_SAMPLER_FIXED_POINT_ONE,
+    TERRAIN_SAMPLER_NAMESPACE,
+    TERRAIN_SAMPLER_VERSION,
+    DeterministicTerrainSampler,
+)
 from open_world_rpg.world.terrain_sampling import (
     MAX_NORMALIZED_TERRAIN_SAMPLE,
     MIN_NORMALIZED_TERRAIN_SAMPLE,
@@ -112,6 +120,11 @@ __all__ = [
     "REGION_SIZE_IN_CHUNKS",
     "REGION_SIZE_IN_TILES",
     "SUPPORTED_GENERATION_FORMAT_VERSION",
+    "TERRAIN_SAMPLER_DIGEST_BITS",
+    "TERRAIN_SAMPLER_FIXED_POINT_BITS",
+    "TERRAIN_SAMPLER_FIXED_POINT_ONE",
+    "TERRAIN_SAMPLER_NAMESPACE",
+    "TERRAIN_SAMPLER_VERSION",
     "ChunkCoordinate",
     "ChunkGenerationKey",
     "ChunkMetadata",
@@ -120,6 +133,7 @@ __all__ = [
     "ChunkTerrain",
     "ChunkTerrainSnapshot",
     "ChunkTransitionError",
+    "DeterministicTerrainSampler",
     "DuplicateTerrainCoordinateError",
     "IncompatibleTerrainDimensionsError",
     "IncompleteTerrainCoverageError",
