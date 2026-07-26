@@ -18,6 +18,9 @@ from open_world_rpg.gameplay import (
     ItemType,
     PlayerInventory,
     PlayerInventorySnapshot,
+    PlayerVitals,
+    PlayerVitalsSnapshot,
+    ToolInstance,
 )
 from open_world_rpg.persistence.document import (
     JsonValue,
@@ -64,6 +67,7 @@ class GameSaveService:
         block_edits: BlockEditStoreSnapshot | None = None,
         inventory: PlayerInventorySnapshot | None = None,
         dropped_items: DroppedItemSnapshot | None = None,
+        vitals: PlayerVitalsSnapshot | None = None,
     ) -> Path:
         """Create and persist a document for the current session."""
         if not isinstance(slot, SaveSlot):
@@ -77,6 +81,8 @@ class GameSaveService:
                 resource_payload["inventory"] = self._inventory_payload(inventory)
             if dropped_items is not None:
                 resource_payload["dropped_items"] = self._drops_payload(dropped_items)
+            if vitals is not None:
+                resource_payload["vitals"] = self._vitals_payload(vitals)
             document = SaveDocument.from_runtime_context(
                 context=self.context,
                 payload=resource_payload,
@@ -205,8 +211,24 @@ class GameSaveService:
             "revision": snapshot.revision,
             "selected_hotbar_index": snapshot.selected_hotbar_index,
             "slots": [
-                None if stack is None else {"item": stack.item.value, "quantity": stack.quantity}
-                for stack in snapshot.slots
+                (
+                    None
+                    if slot is None
+                    else (
+                        {
+                            "kind": "stack",
+                            "item": slot.item.value,
+                            "quantity": slot.quantity,
+                        }
+                        if isinstance(slot, ItemStack)
+                        else {
+                            "kind": "tool",
+                            "item": slot.item.value,
+                            "durability": slot.current_durability,
+                        }
+                    )
+                )
+                for slot in snapshot.slots
             ],
         }
 
@@ -233,6 +255,62 @@ class GameSaveService:
         }
 
     @staticmethod
+    def _vitals_payload(snapshot: PlayerVitalsSnapshot) -> dict[str, JsonValue]:
+        if not isinstance(snapshot, PlayerVitalsSnapshot):
+            raise TypeError("vitals must be a PlayerVitalsSnapshot.")
+        return {
+            "health_milli": snapshot.health_milli,
+            "maximum_health_milli": snapshot.maximum_health_milli,
+            "stamina_milli": snapshot.stamina_milli,
+            "maximum_stamina_milli": snapshot.maximum_stamina_milli,
+            "death_count": snapshot.death_count,
+            "revision": snapshot.revision,
+        }
+
+    def restore_vitals(
+        self,
+        document: SaveDocument,
+        *,
+        expected_world_id: UUID,
+        expected_world_seed: int,
+    ) -> PlayerVitals:
+        """Restore persisted vitals, or clean defaults for an older v1 save."""
+        self.restore_block_edits(
+            document,
+            expected_world_id=expected_world_id,
+            expected_world_seed=expected_world_seed,
+        )
+        value = document.payload.get("vitals")
+        if value is None:
+            return PlayerVitals()
+        try:
+            return PlayerVitals(self._parse_vitals(value))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ResourceStateRestoreError("Saved player vitals are invalid.") from exc
+
+    @staticmethod
+    def _parse_vitals(value: JsonValue) -> PlayerVitalsSnapshot:
+        expected = {
+            "health_milli",
+            "maximum_health_milli",
+            "stamina_milli",
+            "maximum_stamina_milli",
+            "death_count",
+            "revision",
+        }
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("vitals must contain canonical fields.")
+        data = cast(dict[str, Any], value)
+        return PlayerVitalsSnapshot(
+            health_milli=data["health_milli"],
+            maximum_health_milli=data["maximum_health_milli"],
+            stamina_milli=data["stamina_milli"],
+            maximum_stamina_milli=data["maximum_stamina_milli"],
+            death_count=data["death_count"],
+            revision=data["revision"],
+        )
+
+    @staticmethod
     def _parse_inventory(value: JsonValue) -> PlayerInventorySnapshot:
         if not isinstance(value, dict) or set(value) != {
             "revision",
@@ -244,19 +322,34 @@ class GameSaveService:
         raw_slots = data["slots"]
         if not isinstance(raw_slots, list):
             raise TypeError("inventory slots must be a list.")
-        slots: list[ItemStack | None] = []
-        for raw_stack in raw_slots:
-            if raw_stack is None:
+        slots: list[ItemStack | ToolInstance | None] = []
+        for raw_slot in raw_slots:
+            if raw_slot is None:
                 slots.append(None)
                 continue
-            if not isinstance(raw_stack, dict) or set(raw_stack) != {"item", "quantity"}:
-                raise ValueError("inventory stack must contain item and quantity.")
-            slots.append(
-                ItemStack(
-                    item=ItemType(raw_stack["item"]),
-                    quantity=raw_stack["quantity"],
+            if not isinstance(raw_slot, dict):
+                raise TypeError("inventory slot must be an object or null.")
+            fields = set(raw_slot)
+            if fields == {"item", "quantity"} or (
+                fields == {"kind", "item", "quantity"} and raw_slot["kind"] == "stack"
+            ):
+                slots.append(
+                    ItemStack(
+                        item=ItemType(raw_slot["item"]),
+                        quantity=raw_slot["quantity"],
+                    )
                 )
-            )
+            elif fields == {"kind", "item", "durability"} and raw_slot["kind"] == "tool":
+                tool = ToolInstance.create(ItemType(raw_slot["item"]))
+                slots.append(
+                    ToolInstance(
+                        item=tool.item,
+                        current_durability=raw_slot["durability"],
+                        maximum_durability=tool.maximum_durability,
+                    )
+                )
+            else:
+                raise ValueError("inventory slot has an invalid canonical form.")
         return PlayerInventorySnapshot(
             revision=data["revision"],
             selected_hotbar_index=data["selected_hotbar_index"],

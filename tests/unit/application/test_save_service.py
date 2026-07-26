@@ -19,7 +19,12 @@ from open_world_rpg.application.session import (
     SessionState,
 )
 from open_world_rpg.core import JsonLogFormatter, ProjectPaths
-from open_world_rpg.gameplay import DroppedItemManager, ItemType, create_bootstrap_inventory
+from open_world_rpg.gameplay import (
+    DroppedItemManager,
+    ItemType,
+    PlayerVitals,
+    create_bootstrap_inventory,
+)
 from open_world_rpg.persistence.document import (
     CURRENT_SAVE_SCHEMA_VERSION,
     SaveDocument,
@@ -121,6 +126,65 @@ def test_gameplay_resources_round_trip_and_legacy_policy(tmp_path: Path) -> None
     )
     assert legacy_inventory.snapshot() == inventory.snapshot()
     assert len(legacy_drops) == 0
+
+
+def test_survival_vitals_round_trip_defaults_and_validation(tmp_path: Path) -> None:
+    service = create_service(tmp_path)
+    vitals = PlayerVitals()
+    vitals.update_stamina(1_000_000, sprinting=True)
+    vitals.damage(7)
+    service.save(slot=SaveSlot("vitals"), vitals=vitals.snapshot)
+    document = service.load(SaveSlot("vitals"))
+    restored = service.restore_vitals(
+        document,
+        expected_world_id=SESSION_ID,
+        expected_world_seed=42,
+    ).snapshot
+    assert (restored.health, restored.stamina, restored.death_count, restored.revision) == (
+        vitals.snapshot.health,
+        vitals.snapshot.stamina,
+        vitals.snapshot.death_count,
+        vitals.snapshot.revision,
+    )
+    assert restored.regeneration_delay_microseconds == 0
+    legacy = SaveDocument.from_runtime_context(context=service.context)
+    assert (
+        service.restore_vitals(
+            legacy,
+            expected_world_id=SESSION_ID,
+            expected_world_seed=42,
+        ).snapshot.health
+        == 100
+    )
+    malformed = SaveDocument.from_runtime_context(
+        context=service.context,
+        payload={"vitals": {"health_milli": -1}},
+    )
+    with pytest.raises(ResourceStateRestoreError):
+        service.restore_vitals(
+            malformed,
+            expected_world_id=SESSION_ID,
+            expected_world_seed=42,
+        )
+    with pytest.raises(TypeError):
+        service._vitals_payload("bad")  # type: ignore[arg-type]
+    invalid_slot = SaveDocument.from_runtime_context(
+        context=service.context,
+        payload={
+            "inventory": {
+                "revision": 0,
+                "selected_hotbar_index": 0,
+                "slots": [{"kind": "unknown"}] + [None] * 26,
+            }
+        },
+    )
+    with pytest.raises(ResourceStateRestoreError):
+        service.restore_resources(
+            invalid_slot,
+            expected_world_id=SESSION_ID,
+            expected_world_seed=42,
+            legacy_inventory=create_bootstrap_inventory().snapshot(),
+        )
 
 
 @pytest.mark.parametrize(

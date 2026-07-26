@@ -51,6 +51,15 @@ class VoxelHudSnapshot:
     nearest_drop_distance: float | None
     last_pickup: str
     last_placement_consumption: str
+    selected_slot_kind: str = "empty"
+    tool_durability: tuple[int, int] | None = None
+    mining_progress: float = 0.0
+    health: float = 100.0
+    stamina: float = 100.0
+    fall_distance: float = 0.0
+    last_fall_damage: int = 0
+    death_count: int = 0
+    vitals_revision: int = 0
 
     @classmethod
     def create(
@@ -81,6 +90,15 @@ class VoxelHudSnapshot:
         nearest_drop_distance: float | None = None,
         last_pickup: str = "none",
         last_placement_consumption: str = "none",
+        selected_slot_kind: str = "empty",
+        tool_durability: tuple[int, int] | None = None,
+        mining_progress: float = 0.0,
+        health: float = 100.0,
+        stamina: float = 100.0,
+        fall_distance: float = 0.0,
+        last_fall_damage: int = 0,
+        death_count: int = 0,
+        vitals_revision: int = 0,
     ) -> VoxelHudSnapshot:
         block = (math.floor(player.x), math.floor(player.y), math.floor(player.z))
         chunk = ChunkCoordinate(
@@ -122,4 +140,13 @@ class VoxelHudSnapshot:
             nearest_drop_distance=nearest_drop_distance,
             last_pickup=last_pickup,
             last_placement_consumption=last_placement_consumption,
+            selected_slot_kind=selected_slot_kind,
+            tool_durability=tool_durability,
+            mining_progress=mining_progress,
+            health=health,
+            stamina=stamina,
+            fall_distance=fall_distance,
+            last_fall_damage=last_fall_damage,
+            death_count=death_count,
+            vitals_revision=vitals_revision,
         )

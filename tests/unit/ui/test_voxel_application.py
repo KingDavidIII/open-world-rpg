@@ -13,7 +13,13 @@ import pytest
 
 import open_world_rpg.ui.voxel.application as voxel_application
 import open_world_rpg.ui.voxel_demo as voxel_demo
-from open_world_rpg.gameplay import ItemType, PickupResult
+from open_world_rpg.gameplay import (
+    ItemType,
+    MiningStatus,
+    PickupResult,
+    PlayerVitalsSnapshot,
+    ToolInstance,
+)
 from open_world_rpg.ui.voxel.application import (
     GpuChunk,
     VoxelContextUnavailableError,
@@ -24,6 +30,8 @@ from open_world_rpg.ui.voxel.application import (
     _view_matrix,
     _water_render_order,
 )
+from open_world_rpg.ui.voxel.blocks import BlockColumn
+from open_world_rpg.ui.voxel.camera import PlayerState
 from open_world_rpg.ui.voxel.collision import RayHit
 from open_world_rpg.ui.voxel.interaction import InteractionOutcome, InteractionResult
 from open_world_rpg.world import (
@@ -109,6 +117,46 @@ def test_uncaptured_escape_exits_and_unhandled_key_is_harmless(
     assert not application.running
 
 
+def test_mouse_capture_reacquires_only_after_escape_and_not_on_immediate_click(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.running = True
+    application.mouse_captured = True
+    monkeypatch.setattr(pygame.event, "set_grab", lambda _: None)
+    monkeypatch.setattr(pygame.mouse, "set_visible", lambda _: None)
+    monkeypatch.setattr(pygame.mouse, "get_rel", lambda: (0, 0))
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [
+            pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE),
+            pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1),
+        ],
+    )
+    application.process_events()
+    assert not application.mouse_captured
+    assert not application._mining_held  # type: ignore[attr-defined]
+
+
+def test_mouse_button_down_captures_mouse_when_not_already_captured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.running = True
+    application.mouse_captured = False
+    monkeypatch.setattr(pygame.event, "set_grab", lambda _: None)
+    monkeypatch.setattr(pygame.mouse, "set_visible", lambda _: None)
+    monkeypatch.setattr(pygame.mouse, "get_rel", lambda: (0, 0))
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1)],
+    )
+    application.process_events()
+    assert application.mouse_captured
+
+
 def test_inventory_noop_controls_drop_update_pickup_and_uninitialised_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -148,6 +196,225 @@ def test_inventory_noop_controls_drop_update_pickup_and_uninitialised_batch(
     application.update(0.01)
     assert application.dirty
     assert application.last_pickup == "Picked up Stone Block x1"
+
+
+def test_update_reuses_frame_column_cache_and_preserves_block_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.mouse_captured = True
+    edited = WorldBlockCoordinate(x=2, y=10, z=0)
+    application.edits.set_block(edited, BlockMaterial.STONE)
+
+    columns = {
+        (0, 0): BlockColumn(
+            ground_height=5,
+            surface_height=5,
+            surface=BlockMaterial.GRASS,
+            subsurface=BlockMaterial.DIRT,
+        ),
+        (1, 0): BlockColumn(
+            ground_height=2,
+            surface_height=5,
+            surface=BlockMaterial.SAND,
+            subsurface=BlockMaterial.SAND,
+            water=BlockMaterial.WATER,
+        ),
+        (2, 0): BlockColumn(
+            ground_height=2,
+            surface_height=2,
+            surface=BlockMaterial.GRASS,
+            subsurface=BlockMaterial.DIRT,
+        ),
+    }
+    lookups: list[tuple[int, int]] = []
+
+    def column_at(x: int, z: int) -> BlockColumn:
+        lookups.append((x, z))
+        return columns[(x, z)]
+
+    class Keys:
+        def __getitem__(self, _key: int) -> bool:
+            return False
+
+    def inspect_cached_collision(**kwargs: object) -> PlayerState:
+        solid_at = cast(Any, kwargs["solid_at"])
+        assert solid_at(0, 5, 0)
+        assert solid_at(0, 4, 0)
+        assert solid_at(0, 1, 0)
+        assert solid_at(0, 5, 0)
+        assert not solid_at(0, 6, 0)
+        assert not solid_at(1, 3, 0)
+        assert not solid_at(1, 5, 0)
+        assert solid_at(2, 10, 0)
+        return application.player
+
+    monkeypatch.setattr(pygame.key, "get_pressed", Keys)
+    monkeypatch.setattr(application, "_column_at", column_at)
+    monkeypatch.setattr(voxel_application, "move_player", inspect_cached_collision)
+    monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
+
+    application.update(0.01)
+
+    assert lookups == [(0, 0), (1, 0), (2, 0)]
+
+
+def test_survival_update_covers_sprint_jump_fall_damage_and_respawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.mouse_captured = True
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
+    monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
+
+    class Keys:
+        def __init__(self) -> None:
+            self.active = {pygame.K_w, pygame.K_LSHIFT}
+
+        def __getitem__(self, key: int) -> bool:
+            return key in self.active
+
+    keys = Keys()
+    monkeypatch.setattr(pygame.key, "get_pressed", lambda: keys)
+    monkeypatch.setattr(voxel_application, "move_player", lambda **_kwargs: application.player)
+    application.update(1.0)
+    assert application.vitals.snapshot.stamina == 82
+    assert application.dirty
+
+    keys.active = {pygame.K_SPACE}
+    application.player = PlayerState(x=1, y=10, z=1, grounded=True)
+    application._jump_was_pressed = False  # type: ignore[attr-defined]
+    application.update(0.01)
+    assert application.vitals.snapshot.stamina == 70
+    application.vitals.restore(PlayerVitalsSnapshot(stamina_milli=0))
+    application._jump_was_pressed = False  # type: ignore[attr-defined]
+    application.update(0.01)
+    assert "Not enough stamina" in application.save_message
+
+    keys.active = set()
+    application.player = PlayerState(x=1, y=10, z=1, grounded=False)
+    monkeypatch.setattr(
+        voxel_application,
+        "move_player",
+        lambda **_kwargs: PlayerState(x=1, y=9, z=1, grounded=False),
+    )
+    application.update(0.01)
+    assert application.vitals.snapshot.accumulated_fall_milli == 1_000
+
+    application.vitals.restore(
+        PlayerVitalsSnapshot(
+            health_milli=16_000,
+            stamina_milli=50_000,
+            grounded=False,
+            accumulated_fall_milli=5_000,
+        )
+    )
+    application.player = PlayerState(x=1, y=9, z=1, grounded=False)
+    monkeypatch.setattr(
+        voxel_application,
+        "move_player",
+        lambda **_kwargs: PlayerState(x=1, y=8, z=1, grounded=True),
+    )
+    monkeypatch.setattr(voxel_application, "safe_spawn_height", lambda **_kwargs: 20.0)
+    application.update(0.01)
+    assert application.vitals.snapshot.death_count == 1
+    assert application.save_message == "You died \N{EM DASH} respawned"
+
+    application.vitals.restore(
+        PlayerVitalsSnapshot(
+            grounded=False,
+            accumulated_fall_milli=2_999,
+        )
+    )
+    application.player = PlayerState(x=1, y=9, z=1, grounded=False)
+    application.update(0.01)
+    assert application.vitals.snapshot.last_fall_damage == 0
+
+
+def test_application_mining_completion_cancellation_and_tool_break(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.mouse_captured = True
+    application._mining_held = True  # type: ignore[attr-defined]
+    application.target = RayHit(
+        x=1,
+        y=2,
+        z=3,
+        distance=1,
+        material=BlockMaterial.STONE,
+    )
+    outcomes: list[InteractionOutcome] = []
+    monkeypatch.setattr(application, "_apply_interaction", outcomes.append)
+    broken = InteractionOutcome(
+        result=InteractionResult.BROKEN,
+        coordinate=application.target.coordinate,
+    )
+    monkeypatch.setattr(application.interactions, "break_block", lambda **_kwargs: broken)
+    application._update_mining(1)  # type: ignore[attr-defined]
+    assert application.mining.snapshot.status is MiningStatus.ACTIVE
+    application._update_mining(10_000_000)  # type: ignore[attr-defined]
+    assert len(outcomes) == 1
+    assert application.inventory.selected_tool is not None
+    assert application.inventory.selected_tool.current_durability == 63
+
+    application.inventory.set_slot(
+        0,
+        ToolInstance(
+            item=ItemType.WOODEN_PICKAXE,
+            current_durability=1,
+            maximum_durability=64,
+        ),
+    )
+    application._update_mining(10_000_000)  # type: ignore[attr-defined]
+    assert application.inventory.selected_tool is None
+    assert application.save_message == "Wooden Pickaxe broke"
+
+    application._update_mining(1)  # type: ignore[attr-defined]
+    application._mining_held = False  # type: ignore[attr-defined]
+    application._update_mining(1)  # type: ignore[attr-defined]
+    assert application.mining.snapshot.status is MiningStatus.CANCELLED
+    application._mining_held = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        application.interactions,
+        "break_block",
+        lambda **_kwargs: InteractionOutcome(result=InteractionResult.NO_TARGET),
+    )
+    application._update_mining(10_000_000)  # type: ignore[attr-defined]
+    assert application.mining.snapshot.status is MiningStatus.IDLE
+
+    application.inventory.select_hotbar(7)
+    monkeypatch.setattr(application.interactions, "break_block", lambda **_kwargs: broken)
+    application._update_mining(10_000_000)  # type: ignore[attr-defined]
+    assert len(outcomes) == 3
+
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [pygame.event.Event(pygame.MOUSEBUTTONUP, button=1)],
+    )
+    application.process_events()
+    assert not application._mining_held  # type: ignore[attr-defined]
+
+
+def test_mouse_button_up_does_not_cancel_non_primary_buttons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.running = True
+    application._mining_held = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [pygame.event.Event(pygame.MOUSEBUTTONUP, button=2)],
+    )
+    application.process_events()
+    assert application._mining_held  # type: ignore[attr-defined]
 
 
 def test_drop_gpu_batch_reuses_equal_sized_buffer() -> None:
@@ -279,8 +546,8 @@ def test_hotbar_keyboard_wheel_and_mouse_edit_edges(
     )
     application.process_events()
     assert application.hotbar.selected_index == 5
-    assert application.hotbar.selected_material is None
-    assert calls == ["break", "place"]
+    assert application.hotbar.selected_material is BlockMaterial.SAND
+    assert calls == ["place"]
     assert save_load_calls == ["save", "load"]
 
 
@@ -475,6 +742,12 @@ def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths(
     application._feedback_until = 2.0  # type: ignore[attr-defined]
     application.last_interaction = InteractionResult.BROKEN
     monkeypatch.setattr(pygame.time, "get_ticks", lambda: 1000)
+    application.mining.begin(
+        target=WorldBlockCoordinate(x=1, y=2, z=3),
+        material=BlockMaterial.STONE,
+        tool=application.inventory.selected_tool,
+    )
+    application.mining.advance(100_000)
     application._render_hud(12)  # type: ignore[attr-defined]
     assert application.hud_snapshot is not None
     assert application.hud_snapshot.loading

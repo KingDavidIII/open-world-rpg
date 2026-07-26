@@ -21,7 +21,11 @@ from open_world_rpg.application.save_service import GameSaveService
 from open_world_rpg.core import ProjectPaths
 from open_world_rpg.gameplay import (
     DroppedItemManager,
+    ItemStack,
     ItemType,
+    MiningStatus,
+    PlayerVitals,
+    TimedMiningController,
     create_bootstrap_inventory,
     material_for_item,
 )
@@ -287,6 +291,10 @@ class VoxelPrototypeApplication:
             placement_cooldown=self.config.placement_cooldown,
         )
         self.inventory = create_bootstrap_inventory(enabled=self.config.bootstrap_inventory)
+        self.mining = TimedMiningController()
+        self.vitals = PlayerVitals()
+        self._mining_held = False
+        self._jump_was_pressed = False
         self.dropped_items = DroppedItemManager()
         self.last_interaction = InteractionResult.NONE
         self.last_pickup = "none"
@@ -343,8 +351,8 @@ class VoxelPrototypeApplication:
         """Compatibility projection over the authoritative inventory hotbar."""
         return VoxelHotbar(
             slots=tuple(
-                None if stack is None else material_for_item(stack.item)
-                for stack in self.inventory.slots()[:9]
+                None if not isinstance(slot, ItemStack) else material_for_item(slot.item)
+                for slot in self.inventory.slots()[:9]
             ),
             selected_index=self.inventory.selected_hotbar_index,
         )
@@ -367,6 +375,7 @@ class VoxelPrototypeApplication:
                 flags,
                 vsync=1,
             )
+            pygame.event.clear()
             self.context = moderngl.create_context(require=330)
             stage = "resources"
             self.context.enable(moderngl.DEPTH_TEST | moderngl.BLEND | moderngl.CULL_FACE)
@@ -521,6 +530,7 @@ class VoxelPrototypeApplication:
 
     def process_events(self) -> None:
         """Handle mouse capture and discrete prototype controls."""
+        capture_just_lost = False
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -532,6 +542,7 @@ class VoxelPrototypeApplication:
                 if event.key == pygame.K_ESCAPE:
                     if self.mouse_captured:
                         self._capture_mouse(False)
+                        capture_just_lost = True
                     else:
                         self.running = False
                 elif event.key in (pygame.K_F1, pygame.K_h):
@@ -571,27 +582,29 @@ class VoxelPrototypeApplication:
                 elif pygame.K_1 <= event.key <= pygame.K_9 and self.inventory.select_hotbar(
                     event.key - pygame.K_1
                 ):
+                    self.mining.cancel("selected tool changed")
                     self.dirty = True
                     self._selection_changed_at = pygame.time.get_ticks() / 1000.0
             elif event.type == pygame.MOUSEWHEEL:
                 if self.inventory.cycle_hotbar(event.y):
+                    self.mining.cancel("selected tool changed")
                     self.dirty = True
                     self._selection_changed_at = pygame.time.get_ticks() / 1000.0
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if not self.mouse_captured:
+                    if capture_just_lost:
+                        continue
                     self._capture_mouse(True)
                 elif event.button in (4, 5):
                     if self.inventory.cycle_hotbar(1 if event.button == 4 else -1):
+                        self.mining.cancel("selected tool changed")
                         self.dirty = True
                         self._selection_changed_at = pygame.time.get_ticks() / 1000.0
                 elif event.button == 1:
-                    self._apply_interaction(
-                        self.interactions.break_block(
-                            target=self.target,
-                            now=pygame.time.get_ticks() / 1000.0,
-                        )
-                    )
+                    self._mining_held = True
                 elif event.button == 3:
+                    self._mining_held = False
+                    self.mining.cancel("block placement began")
                     self._apply_interaction(
                         self.interactions.place_inventory_block(
                             target=self.target,
@@ -600,13 +613,27 @@ class VoxelPrototypeApplication:
                             now=pygame.time.get_ticks() / 1000.0,
                         )
                     )
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._mining_held = False
+                self.mining.cancel("mining input released")
 
     def update(self, delta_seconds: float) -> None:
         """Apply first-person motion, physics, targeting, and streaming."""
         keys = pygame.key.get_pressed()
         forward = int(keys[pygame.K_w]) - int(keys[pygame.K_s])
         sideways = int(keys[pygame.K_d]) - int(keys[pygame.K_a])
-        speed = (10.0 if keys[pygame.K_LSHIFT] else 5.0) * delta_seconds
+        microseconds = max(0, round(delta_seconds * 1_000_000))
+        sprinting = bool(
+            keys[pygame.K_LSHIFT]
+            and (forward or sideways)
+            and not self.player.flying
+            and self.vitals.can_sprint
+        )
+        if self.vitals.update_stamina(
+            microseconds, sprinting=sprinting, active=self.mouse_captured
+        ):
+            self.dirty = True
+        speed = (10.0 if sprinting else 5.0) * delta_seconds
         flat_forward = (math.sin(math.radians(self.camera.yaw_degrees)), 0.0)
         flat_right = (math.cos(math.radians(self.camera.yaw_degrees)), 0.0)
         delta_x = (flat_forward[0] * forward + flat_right[0] * sideways) * speed
@@ -614,14 +641,50 @@ class VoxelPrototypeApplication:
             -math.cos(math.radians(self.camera.yaw_degrees)) * forward
             + math.sin(math.radians(self.camera.yaw_degrees)) * sideways
         ) * speed
+        jump_pressed = bool(keys[pygame.K_SPACE])
+        jump_requested = (
+            jump_pressed
+            and not self._jump_was_pressed
+            and self.player.grounded
+            and not self.player.flying
+        )
+        jump_allowed = jump_requested and self.vitals.jump()
+        if jump_requested and jump_allowed:
+            self.dirty = True
+        elif jump_requested:
+            self.save_message = "Not enough stamina to jump"
+            self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+        self._jump_was_pressed = jump_pressed
+        previous_player = self.player
+
+        # Frame-local column cache to avoid regenerating terrain during collision checks
+        frame_column_cache: dict[tuple[int, int], BlockColumn] = {}
+
+        def cached_solid_at(x: int, y: int, z: int) -> bool:
+            key = (x, z)
+            if key not in frame_column_cache:
+                frame_column_cache[key] = self._column_at(x, z)
+            column = frame_column_cache[key]
+            coord = WorldBlockCoordinate(x=x, y=y, z=z)
+            edit = self.editable_world.edits.get(coord)
+            if edit is not None:
+                return edit.material.is_solid
+            if y <= column.ground_height:
+                if y == column.ground_height or (y >= column.ground_height - 3):
+                    return True
+                return BlockMaterial.STONE.is_solid
+            if column.water is not None and y < column.surface_height:
+                return BlockMaterial.WATER.is_solid
+            return False
+
         self.player = move_player(
             player=self.player,
             delta_x=delta_x,
             delta_z=delta_z,
             delta_seconds=delta_seconds,
             height_at=self._height_at,
-            solid_at=self._solid_at,
-            jump=bool(keys[pygame.K_SPACE]),
+            solid_at=cached_solid_at,
+            jump=jump_allowed,
         )
         if self.player.flying:
             vertical = int(keys[pygame.K_SPACE]) - int(keys[pygame.K_LCTRL] or keys[pygame.K_RCTRL])
@@ -631,6 +694,17 @@ class VoxelPrototypeApplication:
                 z=self.player.z,
                 flying=True,
             )
+            self.vitals.reset_fall()
+        elif not self.player.grounded and self.player.y < previous_player.y:
+            self.vitals.record_airborne_descent(round((previous_player.y - self.player.y) * 1_000))
+        elif self.player.grounded and not previous_player.grounded:
+            damage = self.vitals.land()
+            if damage:
+                self.dirty = True
+                self.save_message = f"Fall damage: {damage}"
+                self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+            if self.vitals.snapshot.health_milli == 0:
+                self._respawn_after_death()
         if self.dropped_items.update(delta_seconds, solid_at=self._solid_at):
             self.dirty = True
         pickups = self.dropped_items.pickup_near(
@@ -651,6 +725,7 @@ class VoxelPrototypeApplication:
             block_at=self.editable_world.material_at,
             maximum_distance=self.config.interaction_reach,
         )
+        self._update_mining(microseconds)
 
     def render(self) -> None:
         """Draw cached chunk meshes in deterministic order with fog and water motion."""
@@ -995,6 +1070,60 @@ class VoxelPrototypeApplication:
             maximum_distance=self.config.interaction_reach,
         )
 
+    def _update_mining(self, microseconds: int) -> None:
+        if not self._mining_held or not self.mouse_captured or self.target is None:
+            if self.mining.snapshot.status is MiningStatus.ACTIVE:
+                self.mining.cancel("target unavailable")
+            return
+        target = self.target
+        snapshot = self.mining.snapshot
+        selected_tool = self.inventory.selected_tool
+        if (
+            snapshot.status is not MiningStatus.ACTIVE
+            or snapshot.target != target.coordinate
+            or snapshot.target_material is not target.material
+            or snapshot.selected_tool != selected_tool
+        ):
+            self.mining.begin(
+                target=target.coordinate,
+                material=target.material,
+                tool=selected_tool,
+            )
+        snapshot = self.mining.advance(microseconds)
+        if snapshot.status is not MiningStatus.COMPLETED:
+            return
+        outcome = self.interactions.break_block(
+            target=target,
+            now=pygame.time.get_ticks() / 1000.0,
+        )
+        if outcome.result is InteractionResult.BROKEN:
+            self._apply_interaction(outcome)
+            if selected_tool is not None:
+                self.inventory.use_tool(self.inventory.selected_hotbar_index)
+                if self.inventory.selected_tool is None:
+                    self.save_message = f"{selected_tool.item.display_name} broke"
+                    self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.5
+        self.mining.reset()
+
+    def _respawn_after_death(self) -> None:
+        self._mining_held = False
+        self.mining.cancel("player died")
+        self.vitals.respawn()
+        self.player = PlayerState(
+            x=float(self.spawn_x) + 0.5,
+            y=safe_spawn_height(
+                world_x=self.spawn_x,
+                world_z=self.spawn_z,
+                height_at=self._height_at,
+            ),
+            z=float(self.spawn_z) + 0.5,
+            grounded=True,
+        )
+        self.target = None
+        self.dirty = True
+        self.save_message = "You died \N{EM DASH} respawned"
+        self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.5
+
     def _save_edits(self) -> bool:
         if self._save_service is None or self._save_slot is None:
             self.save_message = "Save failed"
@@ -1006,6 +1135,7 @@ class VoxelPrototypeApplication:
                 block_edits=self.edits.snapshot(),
                 inventory=self.inventory.snapshot(),
                 dropped_items=self.dropped_items.snapshot(),
+                vitals=self.vitals.snapshot,
             )
         except Exception:
             self.save_message = "Save failed"
@@ -1036,6 +1166,11 @@ class VoxelPrototypeApplication:
                     enabled=self.config.bootstrap_inventory
                 ).snapshot(),
             )
+            restored_vitals = self._save_service.restore_vitals(
+                document,
+                expected_world_id=self.world_id,
+                expected_world_seed=self.config.world_seed,
+            )
         except Exception:
             self.save_message = "Load failed"
             self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
@@ -1050,6 +1185,9 @@ class VoxelPrototypeApplication:
         self.edits = restored
         self.inventory = restored_inventory
         self.dropped_items = restored_drops
+        self.vitals = restored_vitals
+        self._mining_held = False
+        self.mining.reset()
         self._drop_render_revision = -1
         self.editable_world = EditableVoxelWorld(
             column_at=self._column_at,
@@ -1145,6 +1283,9 @@ class VoxelPrototypeApplication:
 
     def _capture_mouse(self, captured: bool) -> None:
         self.mouse_captured = captured
+        if not captured:
+            self._mining_held = False
+            self.mining.cancel("mouse capture lost")
         pygame.event.set_grab(captured)
         pygame.mouse.set_visible(not captured)
         if captured:
@@ -1244,8 +1385,8 @@ class VoxelPrototypeApplication:
             dirty=self.dirty,
             selected_item=(
                 None
-                if self.inventory.selected_stack is None
-                else self.inventory.selected_stack.item.value
+                if self.inventory.selected_slot is None
+                else self.inventory.selected_slot.item.value
             ),
             selected_quantity=(
                 0
@@ -1261,6 +1402,26 @@ class VoxelPrototypeApplication:
             ),
             last_pickup=self.last_pickup,
             last_placement_consumption=self.last_placement_consumption,
+            selected_slot_kind=(
+                "empty"
+                if self.inventory.selected_slot is None
+                else ("stack" if isinstance(self.inventory.selected_slot, ItemStack) else "tool")
+            ),
+            tool_durability=(
+                None
+                if self.inventory.selected_tool is None
+                else (
+                    self.inventory.selected_tool.current_durability,
+                    self.inventory.selected_tool.maximum_durability,
+                )
+            ),
+            mining_progress=self.mining.snapshot.normalised_progress,
+            health=self.vitals.snapshot.health,
+            stamina=self.vitals.snapshot.stamina,
+            fall_distance=self.vitals.snapshot.accumulated_fall_milli / 1_000,
+            last_fall_damage=self.vitals.snapshot.last_fall_damage,
+            death_count=self.vitals.snapshot.death_count,
+            vitals_revision=self.vitals.snapshot.revision,
         )
         hud = self.hud_snapshot
         lines = [f"{hud.fps:4.0f} FPS"]
@@ -1288,11 +1449,34 @@ class VoxelPrototypeApplication:
                     else f"Drops {hud.active_dropped_items}  nearest none",
                     f"Pickup {hud.last_pickup}",
                     f"Placement {hud.last_placement_consumption}",
+                    f"Vitals H {hud.health:.1f} S {hud.stamina:.1f} (rev {hud.vitals_revision})",
+                    f"Mining {hud.mining_progress * 100:.0f}%  "
+                    f"Fall {hud.fall_distance:.2f}/{hud.last_fall_damage}",
+                    f"Deaths {hud.death_count}  Slot {hud.selected_slot_kind}",
                     f"Save {hud.save_path or 'disabled'} ({'modified' if hud.dirty else 'clean'})",
                 )
             )
         surface = pygame.Surface((1024, 512), pygame.SRCALPHA)
         surface.fill((8, 13, 20, 175), pygame.Rect(0, 0, 500, len(lines) * 22 + 12))
+        pygame.draw.rect(surface, (48, 24, 24, 220), pygame.Rect(18, 445, 200, 14))
+        pygame.draw.rect(
+            surface,
+            (190, 52, 52, 235),
+            pygame.Rect(18, 445, round(200 * hud.health / 100), 14),
+        )
+        pygame.draw.rect(surface, (26, 40, 52, 220), pygame.Rect(18, 464, 200, 12))
+        pygame.draw.rect(
+            surface,
+            (60, 155, 210, 235),
+            pygame.Rect(18, 464, round(200 * hud.stamina / 100), 12),
+        )
+        if hud.mining_progress:
+            pygame.draw.rect(surface, (20, 20, 20, 220), pygame.Rect(412, 300, 200, 12))
+            pygame.draw.rect(
+                surface,
+                (238, 190, 62, 240),
+                pygame.Rect(412, 300, round(200 * hud.mining_progress), 12),
+            )
         for index, line in enumerate(lines):
             surface.blit(
                 self._font.render(line, True, (235, 240, 235)),
@@ -1326,7 +1510,7 @@ class VoxelPrototypeApplication:
         total_width = 9 * slot_size + 8 * gap
         start_x = (surface.get_width() - total_width) // 2
         y = surface.get_height() - slot_size - 18
-        for index, stack in enumerate(self.inventory.slots()[:9]):
+        for index, slot in enumerate(self.inventory.slots()[:9]):
             rect = pygame.Rect(start_x + index * (slot_size + gap), y, slot_size, slot_size)
             is_selected = index == self.inventory.selected_hotbar_index
             pygame.draw.rect(
@@ -1340,29 +1524,63 @@ class VoxelPrototypeApplication:
                 rect,
                 3,
             )
-            if stack is not None:
-                material = material_for_item(stack.item)
-                texture = icon_for[material]
-                atlas_index = tuple(FaceTexture).index(texture)
-                source = pygame.Rect(
-                    atlas_index % ATLAS_COLUMNS * ATLAS_TILE_SIZE,
-                    atlas_index // ATLAS_COLUMNS * ATLAS_TILE_SIZE,
-                    ATLAS_TILE_SIZE,
-                    ATLAS_TILE_SIZE,
-                )
-                icon = pygame.transform.scale(atlas.subsurface(source), (34, 34))
-                surface.blit(icon, (rect.x + 6, rect.y + 6))
-                quantity = font.render(str(stack.quantity), True, (255, 255, 255))
-                surface.blit(
-                    quantity,
-                    (rect.right - quantity.get_width() - 3, rect.bottom - quantity.get_height()),
-                )
+            if slot is not None:
+                if isinstance(slot, ItemStack):
+                    material = material_for_item(slot.item)
+                    texture = icon_for[material]
+                    atlas_index = tuple(FaceTexture).index(texture)
+                    source = pygame.Rect(
+                        atlas_index % ATLAS_COLUMNS * ATLAS_TILE_SIZE,
+                        atlas_index // ATLAS_COLUMNS * ATLAS_TILE_SIZE,
+                        ATLAS_TILE_SIZE,
+                        ATLAS_TILE_SIZE,
+                    )
+                    icon = pygame.transform.scale(atlas.subsurface(source), (34, 34))
+                    surface.blit(icon, (rect.x + 6, rect.y + 6))
+                    quantity = font.render(str(slot.quantity), True, (255, 255, 255))
+                    surface.blit(
+                        quantity,
+                        (
+                            rect.right - quantity.get_width() - 3,
+                            rect.bottom - quantity.get_height(),
+                        ),
+                    )
+                else:
+                    colour = (166, 119, 69) if "wooden" in slot.item.value else (155, 160, 166)
+                    pygame.draw.line(
+                        surface,
+                        colour,
+                        (rect.x + 13, rect.bottom - 10),
+                        (rect.right - 12, rect.y + 10),
+                        5,
+                    )
+                    pygame.draw.line(
+                        surface,
+                        (210, 210, 205),
+                        (rect.right - 21, rect.y + 10),
+                        (rect.right - 7, rect.y + 18),
+                        5,
+                    )
+                    durability = font.render(
+                        str(slot.current_durability),
+                        True,
+                        (255, 110, 90)
+                        if slot.current_durability * 4 <= slot.maximum_durability
+                        else (255, 255, 255),
+                    )
+                    surface.blit(
+                        durability,
+                        (
+                            rect.right - durability.get_width() - 3,
+                            rect.bottom - durability.get_height(),
+                        ),
+                    )
             number = font.render(str(index + 1), True, (245, 245, 245))
             surface.blit(number, (rect.x + 3, rect.y + 1))
         now = pygame.time.get_ticks() / 1000.0
-        selected_stack = self.inventory.selected_stack
-        if selected_stack is not None and now - self._selection_changed_at < 1.4:
-            label = font.render(selected_stack.item.display_name, True, (255, 245, 190))
+        selected_slot = self.inventory.selected_slot
+        if selected_slot is not None and now - self._selection_changed_at < 1.4:
+            label = font.render(selected_slot.item.display_name, True, (255, 245, 190))
             surface.blit(label, (surface.get_width() // 2 - label.get_width() // 2, y - 24))
         if now < self._feedback_until:
             message = self.save_message or self.last_interaction.value

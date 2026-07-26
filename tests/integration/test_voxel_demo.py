@@ -104,6 +104,7 @@ def test_voxel_controls_targeting_and_shutdown_cleanup(
         revision = application.edits.revision
         pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1))
         application.process_events()
+        application._update_mining(10_000_000)  # type: ignore[attr-defined]
         assert application.edits.revision == revision + 1
         assert application.editable_world.block_at(surface) is BlockMaterial.AIR
         support = surface.offset(y=-1)
@@ -115,6 +116,7 @@ def test_voxel_controls_targeting_and_shutdown_cleanup(
             material=application.editable_world.block_at(support),
             face_normal=(0, 1, 0),
         )
+        application.inventory.select_hotbar(2)
         pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3))
         application.process_events()
         assert application.editable_world.block_at(surface) is BlockMaterial.GRASS
@@ -255,7 +257,7 @@ def test_voxel_edits_survive_save_restart_and_atomic_reload(tmp_path: Path) -> N
         boundary = WorldBlockCoordinate(x=16, y=21, z=0)
         first.edits.set_block(grass, BlockMaterial.GRASS)
         first.edits.set_block(boundary, BlockMaterial.STONE)
-        first.inventory.select_hotbar(2)
+        first.inventory.select_hotbar(4)
         placement = first.interactions.place_inventory_block(
             target=RayHit(
                 x=30,
@@ -311,7 +313,7 @@ def test_voxel_edits_survive_save_restart_and_atomic_reload(tmp_path: Path) -> N
         assert second.editable_world.block_at(grass) is BlockMaterial.GRASS
         assert second.editable_world.block_at(boundary) is BlockMaterial.STONE
         assert second.edits.revision == saved_revision
-        assert second.inventory.selected_hotbar_index == 2
+        assert second.inventory.selected_hotbar_index == 4
         assert second.inventory.total_quantity(ItemType.STONE_BLOCK) == 7
         assert len(second.dropped_items) == 1
         assert not second.dirty
