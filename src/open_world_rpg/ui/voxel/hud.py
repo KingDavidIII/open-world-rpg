@@ -42,6 +42,15 @@ class VoxelHudSnapshot:
     save_path: str | None
     dirty: bool
     loading: bool
+    selected_item: str | None
+    selected_quantity: int
+    inventory_revision: int
+    occupied_slots: int
+    total_inventory_items: int
+    active_dropped_items: int
+    nearest_drop_distance: float | None
+    last_pickup: str
+    last_placement_consumption: str
 
     @classmethod
     def create(
@@ -63,6 +72,15 @@ class VoxelHudSnapshot:
         last_interaction: str = "none",
         save_path: str | None = None,
         dirty: bool = False,
+        selected_item: str | None = None,
+        selected_quantity: int = 0,
+        inventory_revision: int = 0,
+        occupied_slots: int = 0,
+        total_inventory_items: int = 0,
+        active_dropped_items: int = 0,
+        nearest_drop_distance: float | None = None,
+        last_pickup: str = "none",
+        last_placement_consumption: str = "none",
     ) -> VoxelHudSnapshot:
         block = (math.floor(player.x), math.floor(player.y), math.floor(player.z))
         chunk = ChunkCoordinate(
@@ -95,4 +113,13 @@ class VoxelHudSnapshot:
             save_path=save_path,
             dirty=dirty,
             loading=loading,
+            selected_item=selected_item,
+            selected_quantity=selected_quantity,
+            inventory_revision=inventory_revision,
+            occupied_slots=occupied_slots,
+            total_inventory_items=total_inventory_items,
+            active_dropped_items=active_dropped_items,
+            nearest_drop_distance=nearest_drop_distance,
+            last_pickup=last_pickup,
+            last_placement_consumption=last_placement_consumption,
         )

@@ -7,6 +7,7 @@ from pathlib import Path
 import pygame
 import pytest
 
+from open_world_rpg.gameplay import ItemType
 from open_world_rpg.ui.voxel.application import (
     VoxelContextUnavailableError,
     VoxelPrototypeApplication,
@@ -254,6 +255,35 @@ def test_voxel_edits_survive_save_restart_and_atomic_reload(tmp_path: Path) -> N
         boundary = WorldBlockCoordinate(x=16, y=21, z=0)
         first.edits.set_block(grass, BlockMaterial.GRASS)
         first.edits.set_block(boundary, BlockMaterial.STONE)
+        first.inventory.select_hotbar(2)
+        placement = first.interactions.place_inventory_block(
+            target=RayHit(
+                x=30,
+                y=29,
+                z=30,
+                distance=1,
+                material=BlockMaterial.STONE,
+                face_normal=(0, 1, 0),
+            ),
+            inventory=first.inventory,
+            player=first.player,
+            now=0,
+        )
+        first._apply_interaction(placement)  # type: ignore[attr-defined]
+        assert first.inventory.total_quantity(ItemType.STONE_BLOCK) == 7
+        drop_source = WorldBlockCoordinate(x=-2, y=20, z=-2)
+        broken = first.interactions.break_block(
+            target=RayHit(
+                x=drop_source.x,
+                y=drop_source.y,
+                z=drop_source.z,
+                distance=1,
+                material=BlockMaterial.GRASS,
+            ),
+            now=0,
+        )
+        first._apply_interaction(broken)  # type: ignore[attr-defined]
+        assert len(first.dropped_items) == 1
         first.dirty = True
         saved_revision = first.edits.revision
         assert first._save_edits()  # type: ignore[attr-defined]
@@ -281,6 +311,9 @@ def test_voxel_edits_survive_save_restart_and_atomic_reload(tmp_path: Path) -> N
         assert second.editable_world.block_at(grass) is BlockMaterial.GRASS
         assert second.editable_world.block_at(boundary) is BlockMaterial.STONE
         assert second.edits.revision == saved_revision
+        assert second.inventory.selected_hotbar_index == 2
+        assert second.inventory.total_quantity(ItemType.STONE_BLOCK) == 7
+        assert len(second.dropped_items) == 1
         assert not second.dirty
         assert second._solid_at(boundary.x, boundary.y, boundary.z)  # type: ignore[attr-defined]
         hit = ray_cast(

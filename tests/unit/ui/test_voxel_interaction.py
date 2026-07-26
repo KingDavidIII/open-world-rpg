@@ -6,10 +6,12 @@ from typing import Any, cast
 
 import pytest
 
+from open_world_rpg.gameplay import ItemType, PlayerInventory
 from open_world_rpg.ui.voxel import (
     BlockColumn,
     BlockType,
     EditableVoxelWorld,
+    InteractionOutcome,
     InteractionResult,
     PlayerState,
     RayHit,
@@ -128,6 +130,57 @@ def test_breaking_precedence_cooldown_and_water_policy() -> None:
     assert outcome.changed
     assert edits.get(hit().coordinate).material is BlockMaterial.AIR  # type: ignore[union-attr]
     assert controller.break_block(target=hit(), now=0.1).result is InteractionResult.COOLDOWN
+
+
+def test_break_reports_drop_and_inventory_placement_consumes_atomically() -> None:
+    world, edits = make_world()
+    controller = VoxelInteractionController(
+        world=world,
+        edits=edits,
+        break_cooldown=0,
+        placement_cooldown=0,
+    )
+    broken = controller.break_block(target=hit(material=BlockMaterial.GRASS), now=0)
+    assert broken.dropped_item is ItemType.GRASS_BLOCK
+    inventory = PlayerInventory()
+    inventory.add(ItemType.STONE_BLOCK, 2)
+    placed = controller.place_inventory_block(
+        target=hit(coordinate=WorldBlockCoordinate(x=0, y=7, z=0)),
+        inventory=inventory,
+        player=PlayerState(x=4, y=4, z=4),
+        now=0,
+    )
+    assert placed.result is InteractionResult.PLACED
+    assert inventory.selected_stack is not None
+    assert inventory.selected_stack.quantity == 1
+    before = inventory.snapshot()
+    assert (
+        controller.place_inventory_block(
+            target=None,
+            inventory=inventory,
+            player=PlayerState(x=4, y=4, z=4),
+            now=1,
+        ).result
+        is InteractionResult.NO_TARGET
+    )
+    assert inventory.snapshot() == before
+    inventory.clear()
+    assert (
+        controller.place_inventory_block(
+            target=hit(coordinate=WorldBlockCoordinate(x=0, y=9, z=0)),
+            inventory=inventory,
+            player=PlayerState(x=4, y=4, z=4),
+            now=2,
+        ).result
+        is InteractionResult.EMPTY_SLOT
+    )
+    with pytest.raises(TypeError):
+        controller.place_inventory_block(
+            target=hit(),
+            inventory="bad",  # type: ignore[arg-type]
+            player=PlayerState(x=4, y=4, z=4),
+            now=3,
+        )
 
 
 def test_placement_validation_and_success() -> None:
@@ -318,3 +371,25 @@ def test_interaction_constructor_validation() -> None:
         VoxelInteractionController(world=world, edits=cast(Any, object()))
     with pytest.raises(ValueError):
         VoxelInteractionController(world=world, edits=edits, break_cooldown=-1)
+
+
+def test_validated_inventory_consumption_failure_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world, edits = make_world()
+    controller = VoxelInteractionController(world=world, edits=edits)
+    inventory = PlayerInventory()
+    inventory.add(ItemType.STONE_BLOCK, 1)
+    monkeypatch.setattr(
+        controller,
+        "place_block",
+        lambda **_kwargs: InteractionOutcome(result=InteractionResult.PLACED),
+    )
+    monkeypatch.setattr(inventory, "remove_from_slot", lambda *_args: False)
+    with pytest.raises(RuntimeError, match="consumption failed"):
+        controller.place_inventory_block(
+            target=hit(),
+            inventory=inventory,
+            player=PlayerState(x=4, y=4, z=4),
+            now=0,
+        )

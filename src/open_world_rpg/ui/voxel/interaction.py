@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from open_world_rpg.gameplay import ItemType, PlayerInventory, item_for_material, material_for_item
 from open_world_rpg.world import (
     CHUNK_SIZE,
     BlockEditStore,
@@ -36,6 +37,7 @@ class InteractionOutcome:
     result: InteractionResult
     coordinate: WorldBlockCoordinate | None = None
     invalidated_chunks: tuple[ChunkCoordinate, ...] = ()
+    dropped_item: ItemType | None = None
 
     @property
     def changed(self) -> bool:
@@ -101,6 +103,7 @@ class VoxelInteractionController:
             result=InteractionResult.BROKEN,
             coordinate=target.coordinate,
             invalidated_chunks=invalidated_chunks_for_edit(target.coordinate),
+            dropped_item=item_for_material(target.material),
         )
 
     def place_block(
@@ -131,3 +134,27 @@ class VoxelInteractionController:
             coordinate=destination,
             invalidated_chunks=invalidated_chunks_for_edit(destination),
         )
+
+    def place_inventory_block(
+        self,
+        *,
+        target: RayHit | None,
+        inventory: PlayerInventory,
+        player: PlayerState,
+        now: float,
+    ) -> InteractionOutcome:
+        """Place from the selected slot and consume exactly one on success."""
+        if not isinstance(inventory, PlayerInventory):
+            raise TypeError("inventory must be a PlayerInventory.")
+        stack = inventory.selected_stack
+        outcome = self.place_block(
+            target=target,
+            material=None if stack is None else material_for_item(stack.item),
+            player=player,
+            now=now,
+        )
+        if outcome.result is InteractionResult.PLACED and not inventory.remove_from_slot(
+            inventory.selected_hotbar_index, 1
+        ):
+            raise RuntimeError("Validated placement inventory consumption failed.")
+        return outcome

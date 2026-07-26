@@ -11,7 +11,9 @@ from uuid import UUID
 import pygame
 import pytest
 
+import open_world_rpg.ui.voxel.application as voxel_application
 import open_world_rpg.ui.voxel_demo as voxel_demo
+from open_world_rpg.gameplay import ItemType, PickupResult
 from open_world_rpg.ui.voxel.application import (
     GpuChunk,
     VoxelContextUnavailableError,
@@ -82,6 +84,8 @@ def test_run_validates_bounded_frame_count() -> None:
         VoxelPrototypeConfig(load_on_start=1)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         VoxelPrototypeConfig(autosave=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        VoxelPrototypeConfig(bootstrap_inventory=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         VoxelPrototypeConfig(load_on_start=True)
     with pytest.raises(ValueError):
@@ -103,6 +107,99 @@ def test_uncaptured_escape_exits_and_unhandled_key_is_harmless(
     )
     application.process_events()
     assert not application.running
+
+
+def test_inventory_noop_controls_drop_update_pickup_and_uninitialised_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application._refresh_drop_gpu()  # type: ignore[attr-defined]
+    application.mouse_captured = True
+    monkeypatch.setattr(application.inventory, "cycle_hotbar", lambda _direction: False)
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [
+            pygame.event.Event(pygame.MOUSEWHEEL, y=0),
+            pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=4),
+        ],
+    )
+    application.process_events()
+    assert not application.dirty
+
+    class Keys:
+        def __getitem__(self, _key: int) -> bool:
+            return False
+
+    monkeypatch.setattr(pygame.key, "get_pressed", Keys)
+    monkeypatch.setattr(
+        voxel_application,
+        "move_player",
+        lambda **_kwargs: application.player,
+    )
+    monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        application.dropped_items,
+        "pickup_near",
+        lambda **_kwargs: (PickupResult(item=ItemType.STONE_BLOCK, accepted=1),),
+    )
+    application.update(0.01)
+    assert application.dirty
+    assert application.last_pickup == "Picked up Stone Block x1"
+
+
+def test_drop_gpu_batch_reuses_equal_sized_buffer() -> None:
+    class Resource:
+        def __init__(self) -> None:
+            self.writes = 0
+            self.released = False
+
+        def write(self, _data: bytes) -> None:
+            self.writes += 1
+
+        def release(self) -> None:
+            self.released = True
+
+    class Context:
+        def buffer(self, _data: bytes) -> Resource:
+            return Resource()
+
+        def vertex_array(self, _program: object, _content: object) -> Resource:
+            return Resource()
+
+    application = VoxelPrototypeApplication()
+    application.context = cast(Any, Context())
+    application.program = cast(Any, object())
+    application.dropped_items.spawn(
+        item=ItemType.STONE_BLOCK,
+        quantity=1,
+        position=(0, 2, 0),
+    )
+    application._refresh_drop_gpu()  # type: ignore[attr-defined]
+    buffer = cast(Any, application._drop_buffer)  # type: ignore[attr-defined]
+    vertex_array = cast(Any, application._drop_array)  # type: ignore[attr-defined]
+    application._refresh_drop_gpu()  # type: ignore[attr-defined]
+    assert buffer.writes == 0
+    application.dropped_items.update(0.01, solid_at=lambda _x, _y, _z: False)
+    application._refresh_drop_gpu()  # type: ignore[attr-defined]
+    assert application._drop_buffer is buffer  # type: ignore[attr-defined]
+    assert buffer.writes == 1
+    application.dropped_items.update(0.5, solid_at=lambda _x, _y, _z: True)
+    application._refresh_drop_gpu()  # type: ignore[attr-defined]
+    settled_writes = buffer.writes
+    application.dropped_items.update(0.01, solid_at=lambda _x, _y, _z: True)
+    application._refresh_drop_gpu()  # type: ignore[attr-defined]
+    assert buffer.writes == settled_writes
+    application.dropped_items.spawn(
+        item=ItemType.DIRT_BLOCK,
+        quantity=1,
+        position=(1, 2, 0),
+    )
+    application._refresh_drop_gpu()  # type: ignore[attr-defined]
+    assert buffer.released
+    assert vertex_array.released
 
 
 def test_render_distance_controls_clamp_between_one_and_four(
