@@ -60,6 +60,12 @@ class VoxelHudSnapshot:
     last_fall_damage: int = 0
     death_count: int = 0
     vitals_revision: int = 0
+    mouse_captured: bool = False
+    target_distance: float | None = None
+    break_preview: str = "no target"
+    placement_preview: str = "no target"
+    placement_target: tuple[int, int, int] | None = None
+    interaction_prompt: str = "Click to capture the mouse"
 
     @classmethod
     def create(
@@ -99,6 +105,11 @@ class VoxelHudSnapshot:
         last_fall_damage: int = 0,
         death_count: int = 0,
         vitals_revision: int = 0,
+        mouse_captured: bool = False,
+        break_preview: str = "no target",
+        placement_preview: str = "no target",
+        placement_target: tuple[int, int, int] | None = None,
+        interaction_prompt: str = "Click to capture the mouse",
     ) -> VoxelHudSnapshot:
         block = (math.floor(player.x), math.floor(player.y), math.floor(player.z))
         chunk = ChunkCoordinate(
@@ -149,4 +160,10 @@ class VoxelHudSnapshot:
             last_fall_damage=last_fall_damage,
             death_count=death_count,
             vitals_revision=vitals_revision,
+            mouse_captured=mouse_captured,
+            target_distance=None if target is None else target.distance,
+            break_preview=break_preview,
+            placement_preview=placement_preview,
+            placement_target=placement_target,
+            interaction_prompt=interaction_prompt,
         )

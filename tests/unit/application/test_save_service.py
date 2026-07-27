@@ -23,6 +23,10 @@ from open_world_rpg.gameplay import (
     DroppedItemManager,
     ItemType,
     PlayerVitals,
+    ProgressionStage,
+    SurvivalProgression,
+    SurvivalProgressionSnapshot,
+    ToolInstance,
     create_bootstrap_inventory,
 )
 from open_world_rpg.persistence.document import (
@@ -100,8 +104,12 @@ def test_gameplay_resources_round_trip_and_legacy_policy(tmp_path: Path) -> None
     service = create_service(tmp_path)
     inventory = create_bootstrap_inventory()
     inventory.select_hotbar(2)
+    inventory.add(ItemType.WOOD_LOG, 3)
+    inventory.add(ItemType.WOOD_PLANK, 7)
+    inventory.add(ItemType.STICK, 5)
     drops = DroppedItemManager()
     drops.spawn(item=ItemType.GRASS_BLOCK, quantity=1, position=(-1.5, 2.5, 3.5))
+    drops.spawn(item=ItemType.WOOD_LOG, quantity=2, position=(1.0, 2.0, 3.0))
     service.save(
         slot=SaveSlot("resources"),
         inventory=inventory.snapshot(),
@@ -467,3 +475,71 @@ def test_missing_slot_load_is_logged_and_preserved(
     assert payload["save_slot"] == "missing"
     assert "schema_version" not in payload
     assert "SaveSlotNotFoundError" in payload["exception"]
+
+
+def test_survival_progression_round_trip_legacy_inference_and_validation(tmp_path: Path) -> None:
+    service = create_service(tmp_path)
+    progression = SurvivalProgression(
+        SurvivalProgressionSnapshot(
+            stage=ProgressionStage.CRAFT_STONE_PICKAXE,
+            guide_completed=True,
+            revision=6,
+        )
+    )
+    service.save(slot=SaveSlot("progression"), progression=progression.snapshot)
+    document = service.load(SaveSlot("progression"))
+    restored = service.restore_progression(
+        document,
+        expected_world_id=SESSION_ID,
+        expected_world_seed=42,
+        legacy_inventory=create_bootstrap_inventory(enabled=False),
+    )
+    assert restored.snapshot == progression.snapshot
+
+    legacy_inventory = create_bootstrap_inventory(enabled=False)
+    legacy_inventory.add_tool(ToolInstance.create(ItemType.STONE_PICKAXE))
+    legacy = SaveDocument.from_runtime_context(context=service.context)
+    inferred = service.restore_progression(
+        legacy,
+        expected_world_id=SESSION_ID,
+        expected_world_seed=42,
+        legacy_inventory=legacy_inventory,
+    )
+    assert inferred.stage is ProgressionStage.COMPLETE
+    assert inferred.guide_completed
+
+    malformed = SaveDocument.from_runtime_context(
+        context=service.context,
+        payload={"progression": {"stage": "unknown", "guide_completed": True, "revision": 0}},
+    )
+    with pytest.raises(ResourceStateRestoreError):
+        service.restore_progression(
+            malformed,
+            expected_world_id=SESSION_ID,
+            expected_world_seed=42,
+            legacy_inventory=legacy_inventory,
+        )
+
+    malformed_fields = SaveDocument.from_runtime_context(
+        context=service.context,
+        payload={"progression": {"stage": "complete"}},
+    )
+    with pytest.raises(ResourceStateRestoreError):
+        service.restore_progression(
+            malformed_fields,
+            expected_world_id=SESSION_ID,
+            expected_world_seed=42,
+            legacy_inventory=legacy_inventory,
+        )
+
+    with pytest.raises(TypeError):
+        service.restore_progression(
+            legacy,
+            expected_world_id=SESSION_ID,
+            expected_world_seed=42,
+            legacy_inventory="bad",  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError):
+        service._progression_payload("bad")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        service._parse_progression(cast(Any, []))

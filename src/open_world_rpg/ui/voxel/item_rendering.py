@@ -15,6 +15,9 @@ _TEXTURE = {
     ItemType.STONE_BLOCK: FaceTexture.STONE,
     ItemType.SAND_BLOCK: FaceTexture.SAND,
     ItemType.SNOW_BLOCK: FaceTexture.SNOW_TOP,
+    ItemType.WOOD_LOG: FaceTexture.DIRT,
+    ItemType.WOOD_PLANK: FaceTexture.SAND,
+    ItemType.STICK: FaceTexture.GRASS_SIDE,
 }
 
 

@@ -20,6 +20,9 @@ from open_world_rpg.gameplay import (
     PlayerInventorySnapshot,
     PlayerVitals,
     PlayerVitalsSnapshot,
+    ProgressionStage,
+    SurvivalProgression,
+    SurvivalProgressionSnapshot,
     ToolInstance,
 )
 from open_world_rpg.persistence.document import (
@@ -68,6 +71,7 @@ class GameSaveService:
         inventory: PlayerInventorySnapshot | None = None,
         dropped_items: DroppedItemSnapshot | None = None,
         vitals: PlayerVitalsSnapshot | None = None,
+        progression: SurvivalProgressionSnapshot | None = None,
     ) -> Path:
         """Create and persist a document for the current session."""
         if not isinstance(slot, SaveSlot):
@@ -83,6 +87,8 @@ class GameSaveService:
                 resource_payload["dropped_items"] = self._drops_payload(dropped_items)
             if vitals is not None:
                 resource_payload["vitals"] = self._vitals_payload(vitals)
+            if progression is not None:
+                resource_payload["progression"] = self._progression_payload(progression)
             document = SaveDocument.from_runtime_context(
                 context=self.context,
                 payload=resource_payload,
@@ -255,6 +261,18 @@ class GameSaveService:
         }
 
     @staticmethod
+    def _progression_payload(
+        snapshot: SurvivalProgressionSnapshot,
+    ) -> dict[str, JsonValue]:
+        if not isinstance(snapshot, SurvivalProgressionSnapshot):
+            raise TypeError("progression must be a SurvivalProgressionSnapshot.")
+        return {
+            "stage": snapshot.stage.value,
+            "guide_completed": snapshot.guide_completed,
+            "revision": snapshot.revision,
+        }
+
+    @staticmethod
     def _vitals_payload(snapshot: PlayerVitalsSnapshot) -> dict[str, JsonValue]:
         if not isinstance(snapshot, PlayerVitalsSnapshot):
             raise TypeError("vitals must be a PlayerVitalsSnapshot.")
@@ -287,6 +305,42 @@ class GameSaveService:
             return PlayerVitals(self._parse_vitals(value))
         except (TypeError, ValueError, KeyError) as exc:
             raise ResourceStateRestoreError("Saved player vitals are invalid.") from exc
+
+    def restore_progression(
+        self,
+        document: SaveDocument,
+        *,
+        expected_world_id: UUID,
+        expected_world_seed: int,
+        legacy_inventory: PlayerInventory,
+    ) -> SurvivalProgression:
+        """Restore progression, or infer a safe state for older schema-v1 saves."""
+        self.restore_block_edits(
+            document,
+            expected_world_id=expected_world_id,
+            expected_world_seed=expected_world_seed,
+        )
+        if not isinstance(legacy_inventory, PlayerInventory):
+            raise TypeError("legacy_inventory must be a PlayerInventory.")
+        value = document.payload.get("progression")
+        if value is None:
+            return SurvivalProgression.infer_from_inventory(legacy_inventory)
+        try:
+            return SurvivalProgression(self._parse_progression(value))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ResourceStateRestoreError("Saved survival progression is invalid.") from exc
+
+    @staticmethod
+    def _parse_progression(value: JsonValue) -> SurvivalProgressionSnapshot:
+        expected = {"stage", "guide_completed", "revision"}
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("progression must contain canonical fields.")
+        data = cast(dict[str, Any], value)
+        return SurvivalProgressionSnapshot(
+            stage=ProgressionStage(data["stage"]),
+            guide_completed=data["guide_completed"],
+            revision=data["revision"],
+        )
 
     @staticmethod
     def _parse_vitals(value: JsonValue) -> PlayerVitalsSnapshot:

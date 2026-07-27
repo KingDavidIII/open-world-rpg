@@ -19,6 +19,9 @@ class ItemType(StrEnum):
     STONE_BLOCK = "stone_block"
     SAND_BLOCK = "sand_block"
     SNOW_BLOCK = "snow_block"
+    WOOD_LOG = "wood_log"
+    WOOD_PLANK = "wood_plank"
+    STICK = "stick"
     WOODEN_PICKAXE = "wooden_pickaxe"
     STONE_PICKAXE = "stone_pickaxe"
     WOODEN_SHOVEL = "wooden_shovel"
@@ -68,6 +71,18 @@ def _block_policy(name: str, material: BlockMaterial) -> ItemPolicy:
     )
 
 
+def _resource_policy(name: str) -> ItemPolicy:
+    return ItemPolicy(
+        stackable=True,
+        maximum_stack_size=MAX_STACK_SIZE,
+        placeable_material=None,
+        tool_classification=None,
+        tool_tier=None,
+        maximum_durability=None,
+        display_name=name,
+    )
+
+
 def _tool_policy(
     name: str, classification: ToolClassification, tier: ToolTier, durability: int
 ) -> ItemPolicy:
@@ -88,6 +103,9 @@ _ITEM_POLICIES: Final = {
     ItemType.STONE_BLOCK: _block_policy("Stone Block", BlockMaterial.STONE),
     ItemType.SAND_BLOCK: _block_policy("Sand Block", BlockMaterial.SAND),
     ItemType.SNOW_BLOCK: _block_policy("Snow Block", BlockMaterial.SNOW),
+    ItemType.WOOD_LOG: _resource_policy("Wood Log"),
+    ItemType.WOOD_PLANK: _resource_policy("Wood Plank"),
+    ItemType.STICK: _resource_policy("Stick"),
     ItemType.WOODEN_PICKAXE: _tool_policy(
         "Wooden Pickaxe", ToolClassification.PICKAXE, ToolTier.WOOD, 64
     ),

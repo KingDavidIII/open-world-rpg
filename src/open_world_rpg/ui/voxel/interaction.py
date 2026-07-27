@@ -1,7 +1,8 @@
-"""Pure breaking, placement, cooldown, and mesh-invalidation policy."""
+"""Pure breaking, placement, reach, cooldown, and mesh-invalidation policy."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -25,6 +26,7 @@ class InteractionResult(StrEnum):
     PLACED = "block placed"
     COOLDOWN = "interaction cooling down"
     NO_TARGET = "no target"
+    OUT_OF_REACH = "target out of reach"
     WATER = "water cannot be broken"
     EMPTY_SLOT = "selected slot is empty"
     OCCUPIED = "placement destination occupied"
@@ -41,6 +43,11 @@ class InteractionOutcome:
 
     @property
     def changed(self) -> bool:
+        return self.result in (InteractionResult.BROKEN, InteractionResult.PLACED)
+
+    @property
+    def allowed(self) -> bool:
+        """Return whether a preview represents an actionable interaction."""
         return self.result in (InteractionResult.BROKEN, InteractionResult.PLACED)
 
 
@@ -65,7 +72,7 @@ def invalidated_chunks_for_edit(
 
 
 class VoxelInteractionController:
-    """Apply edge-triggered creative edits with deterministic cooldowns."""
+    """Validate and apply first-person voxel interactions deterministically."""
 
     def __init__(
         self,
@@ -74,36 +81,110 @@ class VoxelInteractionController:
         edits: BlockEditStore,
         break_cooldown: float = 0.18,
         placement_cooldown: float = 0.18,
+        maximum_reach: float = 5.5,
     ) -> None:
         if not isinstance(world, EditableVoxelWorld):
             raise TypeError("world must be an EditableVoxelWorld.")
         if not isinstance(edits, BlockEditStore):
             raise TypeError("edits must be a BlockEditStore.")
+        for name, value in (
+            ("break_cooldown", break_cooldown),
+            ("placement_cooldown", placement_cooldown),
+            ("maximum_reach", maximum_reach),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite.")
         if break_cooldown < 0 or placement_cooldown < 0:
             raise ValueError("interaction cooldowns must be non-negative.")
+        if maximum_reach <= 0:
+            raise ValueError("maximum_reach must be greater than zero.")
         self._world = world
         self._edits = edits
-        self._break_cooldown = break_cooldown
-        self._placement_cooldown = placement_cooldown
+        self._break_cooldown = float(break_cooldown)
+        self._placement_cooldown = float(placement_cooldown)
+        self._maximum_reach = float(maximum_reach)
         self._last_break = float("-inf")
         self._last_place = float("-inf")
+
+    @property
+    def maximum_reach(self) -> float:
+        return self._maximum_reach
+
+    def preview_break(self, *, target: RayHit | None) -> InteractionOutcome:
+        """Validate a mining target without mutating world state or cooldowns."""
+        target_result = self._target_result(target)
+        if target_result is not None:
+            return target_result
+        assert target is not None
+        if target.material is BlockMaterial.WATER:
+            return InteractionOutcome(
+                result=InteractionResult.WATER,
+                coordinate=target.coordinate,
+            )
+        if target.material is BlockMaterial.AIR:
+            return InteractionOutcome(result=InteractionResult.NO_TARGET)
+        return InteractionOutcome(
+            result=InteractionResult.BROKEN,
+            coordinate=target.coordinate,
+            dropped_item=item_for_material(target.material),
+        )
+
+    def preview_place(
+        self,
+        *,
+        target: RayHit | None,
+        material: BlockMaterial | None,
+        player: PlayerState,
+    ) -> InteractionOutcome:
+        """Validate placement and expose its destination without mutating state."""
+        if not isinstance(player, PlayerState):
+            raise TypeError("player must be a PlayerState.")
+        target_result = self._target_result(target)
+        if target_result is not None:
+            return target_result
+        assert target is not None
+        destination = target.adjacent_coordinate
+        if material is None or material in (BlockMaterial.AIR, BlockMaterial.WATER):
+            return InteractionOutcome(
+                result=InteractionResult.EMPTY_SLOT,
+                coordinate=destination,
+            )
+        if not self._world.supports(destination):
+            return InteractionOutcome(
+                result=InteractionResult.OUT_OF_BOUNDS,
+                coordinate=destination,
+            )
+        if self._world.block_at(destination) is not BlockMaterial.AIR:
+            return InteractionOutcome(
+                result=InteractionResult.OCCUPIED,
+                coordinate=destination,
+            )
+        if player_intersects_block(player=player, coordinate=destination):
+            return InteractionOutcome(
+                result=InteractionResult.PLAYER_INTERSECTION,
+                coordinate=destination,
+            )
+        return InteractionOutcome(
+            result=InteractionResult.PLACED,
+            coordinate=destination,
+        )
 
     def break_block(self, *, target: RayHit | None, now: float) -> InteractionOutcome:
         if now - self._last_break < self._break_cooldown:
             return InteractionOutcome(result=InteractionResult.COOLDOWN)
-        if target is None:
-            return InteractionOutcome(result=InteractionResult.NO_TARGET)
-        if target.material is BlockMaterial.WATER:
-            return InteractionOutcome(result=InteractionResult.WATER)
-        if target.material is BlockMaterial.AIR:
-            return InteractionOutcome(result=InteractionResult.NO_TARGET)
-        self._edits.set_block(target.coordinate, BlockMaterial.AIR)
+        preview = self.preview_break(target=target)
+        if preview.result is not InteractionResult.BROKEN:
+            return preview
+        assert preview.coordinate is not None
+        self._edits.set_block(preview.coordinate, BlockMaterial.AIR)
         self._last_break = now
         return InteractionOutcome(
             result=InteractionResult.BROKEN,
-            coordinate=target.coordinate,
-            invalidated_chunks=invalidated_chunks_for_edit(target.coordinate),
-            dropped_item=item_for_material(target.material),
+            coordinate=preview.coordinate,
+            invalidated_chunks=invalidated_chunks_for_edit(preview.coordinate),
+            dropped_item=preview.dropped_item,
         )
 
     def place_block(
@@ -116,23 +197,17 @@ class VoxelInteractionController:
     ) -> InteractionOutcome:
         if now - self._last_place < self._placement_cooldown:
             return InteractionOutcome(result=InteractionResult.COOLDOWN)
-        if target is None:
-            return InteractionOutcome(result=InteractionResult.NO_TARGET)
-        if material is None or material in (BlockMaterial.AIR, BlockMaterial.WATER):
-            return InteractionOutcome(result=InteractionResult.EMPTY_SLOT)
-        destination = target.adjacent_coordinate
-        if not self._world.supports(destination):
-            return InteractionOutcome(result=InteractionResult.OUT_OF_BOUNDS)
-        if self._world.block_at(destination) is not BlockMaterial.AIR:
-            return InteractionOutcome(result=InteractionResult.OCCUPIED)
-        if player_intersects_block(player=player, coordinate=destination):
-            return InteractionOutcome(result=InteractionResult.PLAYER_INTERSECTION)
-        self._edits.set_block(destination, material)
+        preview = self.preview_place(target=target, material=material, player=player)
+        if preview.result is not InteractionResult.PLACED:
+            return preview
+        assert preview.coordinate is not None
+        assert material is not None
+        self._edits.set_block(preview.coordinate, material)
         self._last_place = now
         return InteractionOutcome(
             result=InteractionResult.PLACED,
-            coordinate=destination,
-            invalidated_chunks=invalidated_chunks_for_edit(destination),
+            coordinate=preview.coordinate,
+            invalidated_chunks=invalidated_chunks_for_edit(preview.coordinate),
         )
 
     def place_inventory_block(
@@ -158,3 +233,18 @@ class VoxelInteractionController:
         ):
             raise RuntimeError("Validated placement inventory consumption failed.")
         return outcome
+
+    def _target_result(self, target: RayHit | None) -> InteractionOutcome | None:
+        if target is None:
+            return InteractionOutcome(result=InteractionResult.NO_TARGET)
+        if not math.isfinite(target.distance) or target.distance < 0:
+            return InteractionOutcome(
+                result=InteractionResult.OUT_OF_REACH,
+                coordinate=target.coordinate,
+            )
+        if target.distance > self._maximum_reach:
+            return InteractionOutcome(
+                result=InteractionResult.OUT_OF_REACH,
+                coordinate=target.coordinate,
+            )
+        return None
