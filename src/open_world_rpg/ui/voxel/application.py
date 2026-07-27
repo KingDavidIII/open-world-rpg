@@ -20,13 +20,17 @@ from open_world_rpg.application import GameMode, RuntimeContext, create_terrain_
 from open_world_rpg.application.save_service import GameSaveService
 from open_world_rpg.core import ProjectPaths
 from open_world_rpg.gameplay import (
+    GUIDE_PAGES,
     CraftingResult,
     DroppedItemManager,
     ItemStack,
     ItemType,
     MiningStatus,
+    PickupResult,
     PlayerVitals,
+    SurvivalProgression,
     TimedMiningController,
+    ToolClassification,
     ToolInstance,
     create_bootstrap_inventory,
     item_policy,
@@ -121,6 +125,7 @@ class VoxelPrototypeConfig:
     autosave: bool = False
     bootstrap_inventory: bool = True
     game_flow_enabled: bool = False
+    progression_enabled: bool = False
     terrain_config: TerrainGenerationConfig = field(
         default_factory=lambda: TerrainGenerationConfig(octave_count=2)
     )
@@ -149,6 +154,10 @@ class VoxelPrototypeConfig:
             raise TypeError("bootstrap_inventory must be a boolean.")
         if not isinstance(self.game_flow_enabled, bool):
             raise TypeError("game_flow_enabled must be a boolean.")
+        if not isinstance(self.progression_enabled, bool):
+            raise TypeError("progression_enabled must be a boolean.")
+        if self.progression_enabled and not self.game_flow_enabled:
+            raise ValueError("progression requires game_flow_enabled.")
         if (self.load_on_start or self.autosave) and self.save_path is None:
             raise ValueError("load and autosave require a save_path.")
 
@@ -300,7 +309,9 @@ class VoxelPrototypeApplication:
             placement_cooldown=self.config.placement_cooldown,
             maximum_reach=self.config.interaction_reach,
         )
-        self.inventory = create_bootstrap_inventory(enabled=self.config.bootstrap_inventory)
+        self.inventory = create_bootstrap_inventory(
+            enabled=self.config.bootstrap_inventory and not self.config.progression_enabled
+        )
         self.flow = GameFlowController(
             initial_screen=(
                 VoxelScreen.MAIN_MENU if self.config.game_flow_enabled else VoxelScreen.PLAYING
@@ -308,6 +319,7 @@ class VoxelPrototypeApplication:
             continue_available=self.save_path is not None and self.save_path.exists(),
         )
         self.inventory_screen = InventoryScreenController()
+        self.progression = SurvivalProgression()
         self.mining = TimedMiningController()
         self.vitals = PlayerVitals()
         self._mining_held = False
@@ -353,6 +365,7 @@ class VoxelPrototypeApplication:
         self._drop_buffer_size = 0
         self._drop_render_key: tuple[object, ...] | None = None
         self._font: pygame.font.Font | None = None
+        self._inventory_atlas_surface: pygame.Surface | None = None
         self.hud_snapshot: VoxelHudSnapshot | None = None
         self._crosshair_buffer: moderngl.Buffer | None = None
         self._crosshair_array: moderngl.VertexArray | None = None
@@ -738,6 +751,15 @@ class VoxelPrototypeApplication:
             self.mining.cancel("mining input released")
 
     def _process_overlay_key(self, key: int) -> None:
+        if self.flow.screen is VoxelScreen.GUIDE:
+            if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE, pygame.K_RIGHT):
+                self._advance_guide()
+            elif key == pygame.K_ESCAPE:
+                self.progression.dismiss_guide()
+                self.flow.close_guide()
+                self._capture_mouse(True)
+                self.dirty = True
+            return
         if self.flow.screen is VoxelScreen.INVENTORY:
             if key in (pygame.K_ESCAPE, pygame.K_e, pygame.K_TAB):
                 self.flow.close_inventory()
@@ -772,6 +794,9 @@ class VoxelPrototypeApplication:
                 self.running = False
             elif self.flow.screen is VoxelScreen.DEAD:
                 self.flow.return_to_main_menu()
+            elif self.flow.screen is VoxelScreen.COMPLETED:
+                self.flow.continue_playing()
+                self._capture_mouse(True)
             return
         if key in (pygame.K_UP, pygame.K_w):
             self.flow.move_selection(-1)
@@ -783,6 +808,10 @@ class VoxelPrototypeApplication:
             self._activate_flow_action(GameFlowAction.RESPAWN)
 
     def _process_overlay_click(self, event: Any) -> None:
+        if self.flow.screen is VoxelScreen.GUIDE:
+            if event.button == 1:
+                self._advance_guide()
+            return
         hud_x, hud_y = self._hud_pointer(event.pos)
         if self.flow.screen is VoxelScreen.INVENTORY:
             slot = self._inventory_slot_at(hud_x, hud_y)
@@ -810,10 +839,18 @@ class VoxelPrototypeApplication:
         if action is GameFlowAction.NEW_WORLD:
             self._reset_new_world()
             self.flow.start_new_world()
-            self._capture_mouse(True)
+            if self.config.progression_enabled and not self.progression.guide_completed:
+                self.flow.open_guide()
+                self._capture_mouse(False)
+            else:
+                self._capture_mouse(True)
         elif action is GameFlowAction.CONTINUE:
             if self._load_edits() and self.flow.continue_world():
-                self._capture_mouse(True)
+                if self.config.progression_enabled and not self.progression.guide_completed:
+                    self.flow.open_guide()
+                    self._capture_mouse(False)
+                else:
+                    self._capture_mouse(True)
         elif action is GameFlowAction.RESUME:
             if self.flow.resume():
                 self._capture_mouse(True)
@@ -826,11 +863,20 @@ class VoxelPrototypeApplication:
             if self.flow.respawn():
                 self._respawn_after_death()
                 self._capture_mouse(True)
+        elif action is GameFlowAction.CONTINUE_PLAYING:
+            if self.flow.continue_playing():
+                self._capture_mouse(True)
         elif action is GameFlowAction.QUIT:
-            if self.flow.screen is VoxelScreen.DEAD:
+            if self.flow.screen in (VoxelScreen.DEAD, VoxelScreen.COMPLETED):
                 self.flow.return_to_main_menu()
             else:
                 self.running = False
+
+    def _advance_guide(self) -> None:
+        if self.progression.next_guide_page():
+            self.flow.close_guide()
+            self._capture_mouse(True)
+            self.dirty = True
 
     def _open_pause_menu(self) -> None:
         if self.flow.pause():
@@ -857,12 +903,37 @@ class VoxelPrototypeApplication:
             self._on_inventory_changed("inventory changed")
 
     def _craft_selected_recipe(self) -> None:
+        recipe = self.inventory_screen.selected_recipe
+        if self.config.progression_enabled and not self.progression.recipe_unlocked(
+            recipe.identifier
+        ):
+            self._apply_inventory_ui_result(False, "Craft a wooden pickaxe first")
+            return
         attempt = self.inventory_screen.craft_selected(self.inventory)
         if attempt.result is CraftingResult.CRAFTED:
             assert attempt.recipe is not None
+            advanced = (
+                self.progression.record_craft(attempt.recipe.output_item, self.inventory)
+                if self.config.progression_enabled
+                else False
+            )
             self._apply_inventory_ui_result(True, f"Crafted {attempt.recipe.output_label}")
+            if advanced:
+                self._on_progression_advanced()
         else:
             self._apply_inventory_ui_result(False, attempt.result.value.capitalize())
+
+    def _on_progression_advanced(self) -> None:
+        self.dirty = True
+        if self.progression.completed:
+            self.save_message = "Stone Age reached — survival loop complete"
+            self._feedback_until = pygame.time.get_ticks() / 1000.0 + 2.5
+            self.flow.mark_completed()
+            self._capture_mouse(False)
+        else:
+            objective = self.progression.objective(self.inventory)
+            self.save_message = f"New objective: {objective.title}"
+            self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.75
 
     def _reset_new_world(self) -> None:
         self.edits = BlockEditStore()
@@ -874,8 +945,27 @@ class VoxelPrototypeApplication:
             placement_cooldown=self.config.placement_cooldown,
             maximum_reach=self.config.interaction_reach,
         )
-        self.inventory = create_bootstrap_inventory(enabled=self.config.bootstrap_inventory)
+        self.inventory = create_bootstrap_inventory(
+            enabled=self.config.bootstrap_inventory and not self.config.progression_enabled
+        )
         self.dropped_items = DroppedItemManager()
+        self.progression = SurvivalProgression()
+        if self.config.progression_enabled:
+            spawn_y = safe_spawn_height(
+                world_x=self.spawn_x,
+                world_z=self.spawn_z,
+                height_at=self._height_at,
+            )
+            for offset_x, offset_z in ((2.0, 0.0), (-1.75, 1.5), (0.0, -2.25)):
+                self.dropped_items.spawn(
+                    item=ItemType.WOOD_LOG,
+                    quantity=1,
+                    position=(
+                        self.spawn_x + 0.5 + offset_x,
+                        spawn_y + 0.35,
+                        self.spawn_z + 0.5 + offset_z,
+                    ),
+                )
         self.vitals = PlayerVitals()
         self.last_interaction = InteractionResult.NONE
         self.last_pickup = "none"
@@ -1052,13 +1142,7 @@ class VoxelPrototypeApplication:
             position=(self.player.x, self.player.y + 0.9, self.player.z),
             inventory=self.inventory,
         )
-        if pickups:
-            self.dirty = True
-            pickup = pickups[-1]
-            item = cast(ItemType, pickup.item)
-            self.save_message = f"Picked up {item.display_name} x{pickup.accepted}"
-            self.last_pickup = self.save_message
-            self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+        self._apply_pickups(pickups)
         self._stream()
         self.target = ray_cast(
             origin=(self.player.x, self.player.y + 1.62, self.player.z),
@@ -1068,6 +1152,25 @@ class VoxelPrototypeApplication:
         )
         self._refresh_interaction_previews()
         self._update_mining(microseconds)
+
+    def _apply_pickups(self, pickups: tuple[PickupResult, ...]) -> None:
+        if not pickups:
+            return
+        self.dirty = True
+        progression_advanced = False
+        for pickup in pickups:
+            item = cast(ItemType, pickup.item)
+            if self.config.progression_enabled:
+                progression_advanced = (
+                    self.progression.record_pickup(item, self.inventory) or progression_advanced
+                )
+        pickup = pickups[-1]
+        item = cast(ItemType, pickup.item)
+        self.save_message = f"Picked up {item.display_name} x{pickup.accepted}"
+        self.last_pickup = self.save_message
+        self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+        if progression_advanced:
+            self._on_progression_advanced()
 
     def render(self) -> None:
         """Draw cached chunk meshes in deterministic order with fog and water motion."""
@@ -1222,6 +1325,7 @@ class VoxelPrototypeApplication:
         self._drop_buffer_size = 0
         self._drop_render_key = None
         self._font = None
+        self._inventory_atlas_surface = None
         self.program = None
         try:
             for coordinate in self.runtime.coordinates():
@@ -1483,6 +1587,17 @@ class VoxelPrototypeApplication:
         target = self.target
         snapshot = self.mining.snapshot
         selected_tool = self.inventory.selected_tool
+        if self.config.progression_enabled and target.material is BlockMaterial.STONE:
+            classification = (
+                None
+                if selected_tool is None
+                else item_policy(selected_tool.item).tool_classification
+            )
+            if classification is not ToolClassification.PICKAXE:
+                self.mining.cancel("stone requires a pickaxe")
+                self.save_message = "Craft and select a pickaxe to mine stone"
+                self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+                return
         if (
             snapshot.status is not MiningStatus.ACTIVE
             or snapshot.target != target.coordinate
@@ -1542,6 +1657,9 @@ class VoxelPrototypeApplication:
                 inventory=self.inventory.snapshot(),
                 dropped_items=self.dropped_items.snapshot(),
                 vitals=self.vitals.snapshot,
+                progression=(
+                    self.progression.snapshot if self.config.progression_enabled else None
+                ),
             )
         except Exception:
             self.save_message = "Save failed"
@@ -1570,13 +1688,25 @@ class VoxelPrototypeApplication:
                 expected_world_id=self.world_id,
                 expected_world_seed=self.config.world_seed,
                 legacy_inventory=create_bootstrap_inventory(
-                    enabled=self.config.bootstrap_inventory
+                    enabled=(
+                        self.config.bootstrap_inventory and not self.config.progression_enabled
+                    )
                 ).snapshot(),
             )
             restored_vitals = self._save_service.restore_vitals(
                 document,
                 expected_world_id=self.world_id,
                 expected_world_seed=self.config.world_seed,
+            )
+            restored_progression = (
+                self._save_service.restore_progression(
+                    document,
+                    expected_world_id=self.world_id,
+                    expected_world_seed=self.config.world_seed,
+                    legacy_inventory=restored_inventory,
+                )
+                if self.config.progression_enabled
+                else SurvivalProgression()
             )
         except Exception:
             self.save_message = "Load failed"
@@ -1593,6 +1723,7 @@ class VoxelPrototypeApplication:
         self.inventory = restored_inventory
         self.dropped_items = restored_drops
         self.vitals = restored_vitals
+        self.progression = restored_progression
         self._mining_held = False
         self.mining.reset()
         self._drop_render_revision = -1
@@ -1916,6 +2047,8 @@ class VoxelPrototypeApplication:
                 (8, 6 + index * 22),
             )
         self._draw_hotbar(surface)
+        if self.config.progression_enabled and self.flow.screen is VoxelScreen.PLAYING:
+            self._draw_objective_panel(surface)
         if self.config.game_flow_enabled and self.flow.overlay_active:
             self._draw_flow_overlay(surface)
         else:
@@ -1936,8 +2069,68 @@ class VoxelPrototypeApplication:
         pygame.draw.rect(surface, (5, 9, 15, 225), surface.get_rect())
         if self.flow.screen is VoxelScreen.INVENTORY:
             self._draw_inventory_screen(surface)
+        elif self.flow.screen is VoxelScreen.GUIDE:
+            self._draw_guide_screen(surface)
         else:
             self._draw_menu_screen(surface)
+
+    def _draw_guide_screen(self, surface: pygame.Surface) -> None:
+        if self._font is None:
+            return
+        font = self._font
+        title_text, body_text = self.progression.guide_page
+        panel = pygame.Rect(166, 116, 692, 280)
+        pygame.draw.rect(surface, (12, 22, 31, 245), panel, border_radius=10)
+        pygame.draw.rect(surface, (255, 220, 112), panel, 2, border_radius=10)
+        title = font.render(title_text, True, (255, 236, 160))
+        surface.blit(title, (panel.centerx - title.get_width() // 2, 152))
+        words = body_text.split()
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            candidate = word if not current else f"{current} {word}"
+            if font.size(candidate)[0] <= 600:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        for index, line in enumerate(lines):
+            rendered = font.render(line, True, (215, 228, 235))
+            surface.blit(rendered, (panel.centerx - rendered.get_width() // 2, 218 + index * 30))
+        page = font.render(
+            f"{self.progression.guide_page_index + 1}/{len(GUIDE_PAGES)}",
+            True,
+            (150, 175, 190),
+        )
+        hint = font.render(
+            "Enter / Space / click to continue   Escape to skip",
+            True,
+            (170, 195, 210),
+        )
+        surface.blit(page, (panel.centerx - page.get_width() // 2, 326))
+        surface.blit(hint, (panel.centerx - hint.get_width() // 2, 356))
+
+    def _draw_objective_panel(self, surface: pygame.Surface) -> None:
+        if self._font is None:
+            return
+        objective = self.progression.objective(self.inventory)
+        panel = pygame.Rect(636, 18, 368, 92)
+        pygame.draw.rect(surface, (8, 15, 22, 220), panel, border_radius=7)
+        pygame.draw.rect(
+            surface,
+            (112, 205, 128) if self.progression.completed else (238, 190, 62),
+            panel,
+            2,
+            border_radius=7,
+        )
+        title = self._font.render(objective.title.upper(), True, (255, 236, 160))
+        instruction = self._font.render(objective.instruction, True, (205, 220, 228))
+        progress = self._font.render(objective.progress, True, (145, 205, 235))
+        surface.blit(title, (650, 28))
+        surface.blit(instruction, (650, 56))
+        surface.blit(progress, (650, 82))
 
     def _draw_menu_screen(self, surface: pygame.Surface) -> None:
         if self._font is None:
@@ -1947,11 +2140,13 @@ class VoxelPrototypeApplication:
             VoxelScreen.MAIN_MENU: "OPEN WORLD RPG",
             VoxelScreen.PAUSED: "PAUSED",
             VoxelScreen.DEAD: "YOU DIED",
+            VoxelScreen.COMPLETED: "STONE AGE REACHED",
         }.get(self.flow.screen, "OPEN WORLD RPG")
         subtitle_text = {
-            VoxelScreen.MAIN_MENU: "v0.9.0 playable-loop candidate",
+            VoxelScreen.MAIN_MENU: "v0.9.0 playable survival loop",
             VoxelScreen.PAUSED: "The world is paused",
             VoxelScreen.DEAD: f"Deaths: {self.vitals.snapshot.death_count}",
+            VoxelScreen.COMPLETED: "The v0.9.0 survival objective is complete",
         }.get(self.flow.screen, "")
         title = font.render(title_text, True, (255, 236, 160))
         subtitle = font.render(subtitle_text, True, (185, 205, 218))
@@ -1997,7 +2192,14 @@ class VoxelPrototypeApplication:
             (170, 195, 210),
         )
         surface.blit(instructions, (76, 98))
-        atlas = pygame.image.frombytes(generate_texture_atlas(), (ATLAS_SIZE, ATLAS_SIZE), "RGBA")
+        atlas = self._inventory_atlas_surface
+        if atlas is None:
+            atlas = pygame.image.frombytes(
+                generate_texture_atlas(),
+                (ATLAS_SIZE, ATLAS_SIZE),
+                "RGBA",
+            )
+            self._inventory_atlas_surface = atlas
         start_x, start_y, size, gap = 76, 138, 48, 7
         for index, slot in enumerate(self.inventory.slots()):
             row, column = divmod(index, 9)
@@ -2037,7 +2239,12 @@ class VoxelPrototypeApplication:
         for index, recipe in enumerate(self.inventory_screen.recipes):
             y = 116 + index * 46
             selected = index == self.inventory_screen.selected_recipe_index
-            can_craft = self.inventory_screen.crafting.can_craft(self.inventory, recipe)
+            unlocked = not self.config.progression_enabled or self.progression.recipe_unlocked(
+                recipe.identifier
+            )
+            can_craft = unlocked and self.inventory_screen.crafting.can_craft(
+                self.inventory, recipe
+            )
             rect = pygame.Rect(626, y, 344, 38)
             pygame.draw.rect(
                 surface,
@@ -2062,12 +2269,28 @@ class VoxelPrototypeApplication:
             detail = pygame.font.Font(None, 16).render(ingredients, True, (160, 180, 190))
             surface.blit(detail, (rect.x + 8, rect.y + 22))
         selected_recipe = self.inventory_screen.selected_recipe
+        selected_unlocked = not self.config.progression_enabled or self.progression.recipe_unlocked(
+            selected_recipe.identifier
+        )
+        craft_hint_text = (
+            f"C / click: craft {selected_recipe.output_label}"
+            if selected_unlocked
+            else "Locked: craft a wooden pickaxe first"
+        )
         craft_hint = font.render(
-            f"C / click: craft {selected_recipe.output_label}",
+            craft_hint_text,
             True,
             (255, 226, 140),
         )
         surface.blit(craft_hint, (626, 402))
+        if self.config.progression_enabled:
+            objective = self.progression.objective(self.inventory)
+            objective_text = font.render(
+                f"Objective: {objective.title} — {objective.progress}",
+                True,
+                (150, 215, 245),
+            )
+            surface.blit(objective_text, (76, 360))
         if self.save_message:
             feedback = font.render(self.save_message, True, (255, 205, 125))
             surface.blit(feedback, (76, 390))

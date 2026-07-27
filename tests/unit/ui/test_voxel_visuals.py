@@ -62,9 +62,15 @@ def test_dropped_item_geometry_is_one_deterministic_atlas_batch() -> None:
             quantity=2,
             position=(0.5, 4.0, 0.5),
         ),
+        DroppedItem(
+            identifier=3,
+            item=ItemType.WOOD_LOG,
+            quantity=1,
+            position=(1.5, 2.0, 0.5),
+        ),
     )
     vertices = build_dropped_item_vertices(items)
-    assert len(vertices) == 2 * 12 * 6 * 4
+    assert len(vertices) == 3 * 12 * 6 * 4
     assert vertices == build_dropped_item_vertices(items)
     assert build_dropped_item_vertices(()) == b""
     with pytest.raises(TypeError):

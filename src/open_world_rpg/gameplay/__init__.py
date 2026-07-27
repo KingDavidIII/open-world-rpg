@@ -46,6 +46,15 @@ from .mining import (
     mining_duration_microseconds,
     tool_speed_multiplier,
 )
+from .progression import (
+    GUIDE_PAGES,
+    STONE_BLOCK_TARGET,
+    WOOD_LOG_TARGET,
+    ProgressionObjective,
+    ProgressionStage,
+    SurvivalProgression,
+    SurvivalProgressionSnapshot,
+)
 from .vitals import (
     FALL_DAMAGE_PER_BLOCK,
     JUMP_STAMINA_COST,
@@ -64,6 +73,7 @@ from .vitals import (
 __all__ = [
     "DEFAULT_RECIPES",
     "FALL_DAMAGE_PER_BLOCK",
+    "GUIDE_PAGES",
     "HOTBAR_SIZE",
     "INVENTORY_CAPACITY",
     "JUMP_STAMINA_COST",
@@ -76,7 +86,9 @@ __all__ = [
     "SPRINT_DRAIN_PER_SECOND",
     "STAMINA_REGEN_DELAY_MICROSECONDS",
     "STAMINA_REGEN_PER_SECOND",
+    "STONE_BLOCK_TARGET",
     "VITAL_SCALE",
+    "WOOD_LOG_TARGET",
     "CraftingAttempt",
     "CraftingCatalogue",
     "CraftingRecipe",
@@ -98,7 +110,11 @@ __all__ = [
     "PlayerInventorySnapshot",
     "PlayerVitals",
     "PlayerVitalsSnapshot",
+    "ProgressionObjective",
+    "ProgressionStage",
     "RecipeIngredient",
+    "SurvivalProgression",
+    "SurvivalProgressionSnapshot",
     "TimedMiningController",
     "ToolClassification",
     "ToolInstance",

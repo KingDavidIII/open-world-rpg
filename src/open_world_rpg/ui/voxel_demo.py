@@ -67,6 +67,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             load_on_start=arguments.load_on_start,
             autosave=arguments.autosave,
             game_flow_enabled=not arguments.direct_play,
+            progression_enabled=not arguments.direct_play,
         )
     )
     try:

@@ -187,3 +187,24 @@ def test_flow_handles_an_all_disabled_custom_menu() -> None:
     flow = DisabledFlow(initial_screen=VoxelScreen.MAIN_MENU)
     assert not flow.move_selection(1)
     assert flow.activate_selected() is GameFlowAction.NONE
+
+
+def test_guide_and_completion_flow_transitions() -> None:
+    flow = GameFlowController()
+    assert flow.open_guide()
+    assert flow.screen is VoxelScreen.GUIDE
+    assert flow.overlay_active
+    assert not flow.open_guide()
+    assert flow.close_guide()
+    assert not flow.close_guide()
+
+    assert flow.mark_completed()
+    assert not flow.mark_completed()
+    assert [option.action for option in flow.options] == [
+        GameFlowAction.CONTINUE_PLAYING,
+        GameFlowAction.SAVE_AND_QUIT,
+        GameFlowAction.QUIT,
+    ]
+    assert flow.activate_selected() is GameFlowAction.CONTINUE_PLAYING
+    assert flow.continue_playing()
+    assert not flow.continue_playing()

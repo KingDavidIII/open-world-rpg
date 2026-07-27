@@ -20,6 +20,9 @@ from open_world_rpg.gameplay import (
     MiningStatus,
     PickupResult,
     PlayerVitalsSnapshot,
+    ProgressionStage,
+    SurvivalProgression,
+    SurvivalProgressionSnapshot,
     ToolInstance,
 )
 from open_world_rpg.ui.voxel.application import (
@@ -99,6 +102,10 @@ def test_run_validates_bounded_frame_count() -> None:
         VoxelPrototypeConfig(bootstrap_inventory=1)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         VoxelPrototypeConfig(game_flow_enabled=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        VoxelPrototypeConfig(progression_enabled=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        VoxelPrototypeConfig(progression_enabled=True)
     with pytest.raises(ValueError):
         VoxelPrototypeConfig(load_on_start=True)
     with pytest.raises(ValueError):
@@ -921,10 +928,12 @@ def test_voxel_entry_point_selects_smoke_and_interactive_modes(
     assert voxel_demo.main([]) == 0
     assert not calls[-1][0].hidden_window
     assert calls[-1][0].game_flow_enabled
+    assert calls[-1][0].progression_enabled
     assert calls[-1][0].save_path == Path("saves/voxel.json")
     assert calls[-1][1] is None
     assert voxel_demo.main(["--direct-play"]) == 0
     assert not calls[-1][0].game_flow_enabled
+    assert not calls[-1][0].progression_enabled
     save_path = tmp_path / "voxel.json"
     assert (
         voxel_demo.main(
@@ -1840,5 +1849,306 @@ def test_game_flow_overlay_is_composed_by_the_authoritative_hud(
         assert application.hud_snapshot.selected_item == ItemType.WOOD_LOG.value
         assert application.hud_snapshot.selected_material is None
         assert application.flow.screen is VoxelScreen.MAIN_MENU
+    finally:
+        pygame.quit()
+
+
+def test_playable_progression_new_world_guide_recipe_gate_and_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(
+            game_flow_enabled=True,
+            progression_enabled=True,
+            render_distance=0,
+        )
+    )
+    assert application.inventory.occupied_slots == 0
+    captures: list[bool] = []
+    monkeypatch.setattr(application, "_capture_mouse", captures.append)
+    monkeypatch.setattr(voxel_application, "safe_spawn_height", lambda **_kwargs: 12.0)
+    monkeypatch.setattr(application, "_place_player_at_spawn", lambda: None)
+    monkeypatch.setattr(application, "_refresh_interaction_previews", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(pygame.time, "get_ticks", lambda: 2000)
+
+    application._activate_flow_action(GameFlowAction.NEW_WORLD)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.GUIDE
+    assert len(application.dropped_items) == 3
+    assert {drop.item for drop in application.dropped_items.items()} == {ItemType.WOOD_LOG}
+    assert captures[-1] is False
+
+    application._advance_guide()  # type: ignore[attr-defined]
+    application._advance_guide()  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.GUIDE
+    application._advance_guide()  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.PLAYING
+    assert application.progression.guide_completed
+    assert captures[-1] is True
+
+    application.inventory_screen.selected_recipe_index = 4
+    application._craft_selected_recipe()  # type: ignore[attr-defined]
+    assert application.save_message == "Craft a wooden pickaxe first"
+
+    application.progression = SurvivalProgression(
+        SurvivalProgressionSnapshot(
+            stage=ProgressionStage.CRAFT_STONE_PICKAXE,
+            guide_completed=True,
+        )
+    )
+    application.inventory.add(ItemType.STONE_BLOCK, 3)
+    application.inventory.add(ItemType.STICK, 2)
+    application._craft_selected_recipe()  # type: ignore[attr-defined]
+    assert application.progression.completed
+    assert application.flow.screen is VoxelScreen.COMPLETED
+    assert "Stone Age reached" in application.save_message
+    assert captures[-1] is False
+
+    application._activate_flow_action(GameFlowAction.CONTINUE_PLAYING)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.PLAYING
+    assert captures[-1] is True
+    application.flow.mark_completed()
+    application._activate_flow_action(GameFlowAction.QUIT)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.MAIN_MENU
+
+
+def test_progression_pickups_stone_tool_gate_and_objective_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(game_flow_enabled=True, progression_enabled=True)
+    )
+    monkeypatch.setattr(pygame.time, "get_ticks", lambda: 1000)
+    captures: list[bool] = []
+    monkeypatch.setattr(application, "_capture_mouse", captures.append)
+
+    application.inventory.add(ItemType.WOOD_LOG, 3)
+    application._apply_pickups(  # type: ignore[attr-defined]
+        (PickupResult(item=ItemType.WOOD_LOG, accepted=3),)
+    )
+    assert application.progression.stage is ProgressionStage.CRAFT_PLANKS
+    assert application.save_message == "New objective: Craft wood planks"
+    application._apply_pickups(())  # type: ignore[attr-defined]
+    application._apply_pickups(  # type: ignore[attr-defined]
+        (PickupResult(item=ItemType.DIRT_BLOCK, accepted=1),)
+    )
+
+    application.progression = SurvivalProgression(
+        SurvivalProgressionSnapshot(
+            stage=ProgressionStage.COLLECT_STONE,
+            guide_completed=True,
+        )
+    )
+    application.mouse_captured = True
+    application._mining_held = True  # type: ignore[attr-defined]
+    application.target = RayHit(
+        x=0,
+        y=0,
+        z=0,
+        distance=1.0,
+        material=BlockMaterial.STONE,
+    )
+    application.break_preview = InteractionOutcome(
+        result=InteractionResult.BROKEN,
+        coordinate=WorldBlockCoordinate(x=0, y=0, z=0),
+    )
+    application._update_mining(1)  # type: ignore[attr-defined]
+    assert application.save_message == "Craft and select a pickaxe to mine stone"
+
+    application.inventory.add_tool(ToolInstance.create(ItemType.WOODEN_PICKAXE), slot=1)
+    application.inventory.select_hotbar(1)
+    application._update_mining(1)  # type: ignore[attr-defined]
+    assert application.mining.snapshot.status is MiningStatus.ACTIVE
+
+
+def test_progression_state_round_trips_through_voxel_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_path = tmp_path / "progression.json"
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(
+            save_path=save_path,
+            render_distance=0,
+            game_flow_enabled=True,
+            progression_enabled=True,
+        )
+    )
+    application.progression = SurvivalProgression(
+        SurvivalProgressionSnapshot(
+            stage=ProgressionStage.COLLECT_STONE,
+            guide_completed=True,
+            revision=4,
+        )
+    )
+    assert application._save_edits()  # type: ignore[attr-defined]
+    application.progression = SurvivalProgression()
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
+    assert application._load_edits()  # type: ignore[attr-defined]
+    assert application.progression.stage is ProgressionStage.COLLECT_STONE
+    assert application.progression.guide_completed
+    assert application.progression.snapshot.revision == 4
+
+
+def test_progression_guide_and_objective_render_paths() -> None:
+    pygame.init()
+    pygame.font.init()
+    try:
+        application = VoxelPrototypeApplication(
+            config=VoxelPrototypeConfig(game_flow_enabled=True, progression_enabled=True)
+        )
+        application._font = pygame.font.Font(None, 22)  # type: ignore[attr-defined]
+        surface = pygame.Surface((1024, 512), pygame.SRCALPHA)
+        application.flow.start_new_world()
+        application.flow.open_guide()
+        application._draw_flow_overlay(surface)  # type: ignore[attr-defined]
+        application._draw_objective_panel(surface)  # type: ignore[attr-defined]
+        application.flow.screen = VoxelScreen.INVENTORY
+        application.inventory_screen.selected_recipe_index = 4
+        application._draw_inventory_screen(surface)  # type: ignore[attr-defined]
+        application.progression = SurvivalProgression(
+            SurvivalProgressionSnapshot(
+                stage=ProgressionStage.COLLECT_STONE,
+                guide_completed=True,
+            )
+        )
+        application._draw_inventory_screen(surface)  # type: ignore[attr-defined]
+        application.progression = SurvivalProgression(
+            SurvivalProgressionSnapshot(
+                stage=ProgressionStage.COMPLETE,
+                guide_completed=True,
+            )
+        )
+        application.flow.screen = VoxelScreen.COMPLETED
+        application._draw_flow_overlay(surface)  # type: ignore[attr-defined]
+        application._draw_objective_panel(surface)  # type: ignore[attr-defined]
+        application._font = None  # type: ignore[attr-defined]
+        application._draw_guide_screen(surface)  # type: ignore[attr-defined]
+        application._draw_objective_panel(surface)  # type: ignore[attr-defined]
+    finally:
+        pygame.quit()
+
+
+def test_progression_overlay_input_continue_and_skip_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(game_flow_enabled=True, progression_enabled=True)
+    )
+    captures: list[bool] = []
+    monkeypatch.setattr(application, "_capture_mouse", captures.append)
+    application.flow.start_new_world()
+    application.flow.open_guide()
+
+    application._process_overlay_key(pygame.K_RETURN)  # type: ignore[attr-defined]
+    application._process_overlay_key(pygame.K_SPACE)  # type: ignore[attr-defined]
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(0, 0))
+    )
+    assert application.flow.screen is VoxelScreen.PLAYING
+    assert application.progression.guide_completed
+    assert captures[-1] is True
+
+    application.progression = SurvivalProgression()
+    application.flow.open_guide()
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=2, pos=(0, 0))
+    )
+    assert application.flow.screen is VoxelScreen.GUIDE
+    application._process_overlay_key(pygame.K_ESCAPE)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.PLAYING
+    assert application.progression.guide_completed
+
+    application.flow.mark_completed()
+    application._process_overlay_key(pygame.K_ESCAPE)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.PLAYING
+
+    application.flow.return_to_main_menu()
+    application.flow.set_continue_available(True)
+    application.progression = SurvivalProgression()
+    monkeypatch.setattr(application, "_load_edits", lambda: True)
+    application._activate_flow_action(GameFlowAction.CONTINUE)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.GUIDE
+    assert captures[-1] is False
+
+    application.flow.return_to_main_menu()
+    application.flow.set_continue_available(True)
+    application.progression = SurvivalProgression(SurvivalProgressionSnapshot(guide_completed=True))
+    application._activate_flow_action(GameFlowAction.CONTINUE)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.PLAYING
+    assert captures[-1] is True
+
+
+def test_progression_overlay_fallback_wrapped_guide_and_playing_hud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Resource:
+        def write(self, _data: bytes) -> None:
+            return None
+
+        def use(self, *, location: int) -> None:
+            assert location == 1
+
+        def render(self, _mode: int) -> None:
+            return None
+
+    class Context:
+        def disable(self, _flag: int) -> None:
+            return None
+
+        def enable(self, _flag: int) -> None:
+            return None
+
+    class GuideStub:
+        guide_page_index = 0
+        guide_page = ("GUIDE", "")
+
+    pygame.init()
+    pygame.font.init()
+    try:
+        application = VoxelPrototypeApplication(
+            config=VoxelPrototypeConfig(game_flow_enabled=True, progression_enabled=True)
+        )
+        captures: list[bool] = []
+        monkeypatch.setattr(application, "_capture_mouse", captures.append)
+        application.flow.start_new_world()
+        application.flow.open_guide()
+
+        application._process_overlay_key(pygame.K_a)  # type: ignore[attr-defined]
+        assert application.flow.screen is VoxelScreen.GUIDE
+
+        application.flow.close_guide()
+        captured_before = list(captures)
+        application._activate_flow_action(  # type: ignore[attr-defined]
+            GameFlowAction.CONTINUE_PLAYING
+        )
+        assert application.flow.screen is VoxelScreen.PLAYING
+        assert captures == captured_before
+
+        surface = pygame.Surface((1024, 512), pygame.SRCALPHA)
+        application._font = pygame.font.Font(None, 22)  # type: ignore[attr-defined]
+        guide = GuideStub()
+        application.progression = cast(Any, guide)
+        guide.guide_page = ("WRAPPED GUIDE", " ".join(["survival"] * 100))
+        application._draw_guide_screen(surface)  # type: ignore[attr-defined]
+        guide.guide_page = ("EMPTY GUIDE", "")
+        application._draw_guide_screen(surface)  # type: ignore[attr-defined]
+        guide.guide_page = ("LONG WORD", "survival" * 100)
+        application._draw_guide_screen(surface)  # type: ignore[attr-defined]
+
+        application.progression = SurvivalProgression(
+            SurvivalProgressionSnapshot(guide_completed=True)
+        )
+        application.context = cast(Any, Context())
+        application._hud_texture = cast(Any, Resource())  # type: ignore[attr-defined]
+        application._hud_array = cast(Any, Resource())  # type: ignore[attr-defined]
+        objective_surfaces: list[pygame.Surface] = []
+        monkeypatch.setattr(application, "_draw_objective_panel", objective_surfaces.append)
+        monkeypatch.setattr(pygame.time, "get_ticks", lambda: 10_000)
+
+        application._render_hud(0)  # type: ignore[attr-defined]
+
+        assert len(objective_surfaces) == 1
     finally:
         pygame.quit()

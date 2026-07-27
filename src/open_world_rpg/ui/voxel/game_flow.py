@@ -8,10 +8,12 @@ from enum import StrEnum
 
 class VoxelScreen(StrEnum):
     MAIN_MENU = "main menu"
+    GUIDE = "guide"
     PLAYING = "playing"
     INVENTORY = "inventory"
     PAUSED = "paused"
     DEAD = "dead"
+    COMPLETED = "completed"
 
 
 class GameFlowAction(StrEnum):
@@ -23,6 +25,7 @@ class GameFlowAction(StrEnum):
     SAVE_AND_QUIT = "save and quit"
     QUIT = "quit"
     RESPAWN = "respawn"
+    CONTINUE_PLAYING = "continue playing"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -91,6 +94,15 @@ class GameFlowController:
                 MenuOption(label="Respawn", action=GameFlowAction.RESPAWN),
                 MenuOption(label="Main Menu", action=GameFlowAction.QUIT),
             )
+        if self.screen is VoxelScreen.COMPLETED:
+            return (
+                MenuOption(
+                    label="Continue Playing",
+                    action=GameFlowAction.CONTINUE_PLAYING,
+                ),
+                MenuOption(label="Save & Quit", action=GameFlowAction.SAVE_AND_QUIT),
+                MenuOption(label="Main Menu", action=GameFlowAction.QUIT),
+            )
         return ()
 
     def set_continue_available(self, available: bool) -> None:
@@ -134,6 +146,20 @@ class GameFlowController:
         self.selected_index = 0
         return True
 
+    def open_guide(self) -> bool:
+        if self.screen is not VoxelScreen.PLAYING:
+            return False
+        self.screen = VoxelScreen.GUIDE
+        self.selected_index = 0
+        return True
+
+    def close_guide(self) -> bool:
+        if self.screen is not VoxelScreen.GUIDE:
+            return False
+        self.screen = VoxelScreen.PLAYING
+        self.selected_index = 0
+        return True
+
     def open_inventory(self) -> bool:
         if self.screen is not VoxelScreen.PLAYING:
             return False
@@ -166,6 +192,20 @@ class GameFlowController:
         if self.screen is VoxelScreen.DEAD:
             return False
         self.screen = VoxelScreen.DEAD
+        self.selected_index = 0
+        return True
+
+    def mark_completed(self) -> bool:
+        if self.screen is VoxelScreen.COMPLETED:
+            return False
+        self.screen = VoxelScreen.COMPLETED
+        self.selected_index = 0
+        return True
+
+    def continue_playing(self) -> bool:
+        if self.screen is not VoxelScreen.COMPLETED:
+            return False
+        self.screen = VoxelScreen.PLAYING
         self.selected_index = 0
         return True
 
