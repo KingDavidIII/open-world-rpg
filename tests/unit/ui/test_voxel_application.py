@@ -108,6 +108,8 @@ def test_run_validates_bounded_frame_count() -> None:
             VoxelPrototypeConfig(**{field_name: value})  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="hidden_window"):
         VoxelPrototypeConfig(hidden_window=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="vsync_enabled"):
+        VoxelPrototypeConfig(vsync_enabled=1)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="terrain_config"):
         VoxelPrototypeConfig(terrain_config=cast(Any, object()))
     with pytest.raises(TypeError):
@@ -754,6 +756,7 @@ def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     application = VoxelPrototypeApplication()
+    assert not application.show_help
     application.show_help = True
     application.show_debug = False
     assert "CURSOR" in application._caption(0)  # type: ignore[attr-defined]
@@ -820,6 +823,58 @@ def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths(
     application.target = None
     application._refresh_interaction_previews()  # type: ignore[attr-defined]
     application._render_hud(12)  # type: ignore[attr-defined]
+
+
+def test_hud_texture_upload_is_throttled_while_cached_hud_still_renders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Texture:
+        writes = 0
+
+        def write(self, _data: bytes) -> None:
+            self.writes += 1
+
+        def use(self, *, location: int) -> None:
+            assert location == 1
+
+    class Array:
+        renders = 0
+
+        def render(self, _mode: int) -> None:
+            self.renders += 1
+
+    class Context:
+        def disable(self, _flag: int) -> None:
+            return None
+
+        def enable(self, _flag: int) -> None:
+            return None
+
+    pygame.init()
+    pygame.font.init()
+    try:
+        ticks = [1_000]
+        application = VoxelPrototypeApplication()
+        texture = Texture()
+        array = Array()
+        application.context = cast(Any, Context())
+        application._hud_texture = cast(Any, texture)  # type: ignore[attr-defined]
+        application._hud_array = cast(Any, array)  # type: ignore[attr-defined]
+        application._font = pygame.font.Font(None, 22)  # type: ignore[attr-defined]
+        monkeypatch.setattr(pygame.time, "get_ticks", lambda: ticks[0])
+
+        application._render_hud(0)  # type: ignore[attr-defined]
+        ticks[0] = 1_050
+        application._render_hud(0)  # type: ignore[attr-defined]
+        assert texture.writes == 1
+        assert array.renders == 2
+
+        ticks[0] = 1_110
+        application._render_hud(0)  # type: ignore[attr-defined]
+        assert texture.writes == 2
+        assert array.renders == 3
+    finally:
+        pygame.quit()
 
 
 def test_stream_without_context_maintains_domain_cache_only() -> None:
@@ -999,6 +1054,7 @@ def test_voxel_entry_point_selects_release_modes_and_runtime_options(
                 "360",
                 "--target-fps",
                 "90",
+                "--vsync",
                 "--render-distance",
                 "2",
                 "--world-seed",
@@ -1013,6 +1069,7 @@ def test_voxel_entry_point_selects_release_modes_and_runtime_options(
     assert calls[-1][0].width_pixels == 640
     assert calls[-1][0].height_pixels == 360
     assert calls[-1][0].target_fps == 90
+    assert calls[-1][0].vsync_enabled
     assert calls[-1][0].render_distance == 2
     assert calls[-1][0].world_seed == 42
 
@@ -2018,7 +2075,16 @@ def test_playable_progression_new_world_guide_recipe_gate_and_completion(
     application._activate_flow_action(GameFlowAction.NEW_WORLD)  # type: ignore[attr-defined]
     assert application.flow.screen is VoxelScreen.GUIDE
     assert len(application.dropped_items) == 3
-    assert {drop.item for drop in application.dropped_items.items()} == {ItemType.WOOD_LOG}
+    starter_logs = application.dropped_items.items()
+    assert {drop.item for drop in starter_logs} == {ItemType.WOOD_LOG}
+    assert all(drop.position[1] == pytest.approx(12.35) for drop in starter_logs)
+    forward_x, _, forward_z = application.camera.forward
+    assert all(
+        (drop.position[0] - application.spawn_x - 0.5) * forward_x
+        + (drop.position[2] - application.spawn_z - 0.5) * forward_z
+        > 2.0
+        for drop in starter_logs
+    )
     assert captures[-1] is False
 
     application._advance_guide()  # type: ignore[attr-defined]

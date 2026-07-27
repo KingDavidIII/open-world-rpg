@@ -79,6 +79,30 @@ def test_dropped_item_geometry_is_one_deterministic_atlas_batch() -> None:
         build_dropped_item_vertices(("bad",))  # type: ignore[arg-type]
 
 
+def test_wood_log_drop_is_larger_and_lifted_for_first_run_visibility() -> None:
+    wood = DroppedItem(
+        identifier=1,
+        item=ItemType.WOOD_LOG,
+        quantity=1,
+        position=(0.0, 2.0, 0.0),
+    )
+    stone = DroppedItem(
+        identifier=2,
+        item=ItemType.STONE_BLOCK,
+        quantity=1,
+        position=(0.0, 2.0, 0.0),
+    )
+    wood_values = struct.unpack("72f", build_dropped_item_vertices((wood,)))
+    stone_values = struct.unpack("72f", build_dropped_item_vertices((stone,)))
+    wood_x = wood_values[0::6]
+    stone_x = stone_values[0::6]
+    wood_y = wood_values[1::6]
+    stone_y = stone_values[1::6]
+    assert max(wood_x) - min(wood_x) == pytest.approx(0.68)
+    assert max(stone_x) - min(stone_x) == pytest.approx(0.36)
+    assert sum(wood_y) / len(wood_y) > sum(stone_y) / len(stone_y)
+
+
 def test_side_strata_select_grass_dirt_stone_sand_and_snow() -> None:
     grass = grass_column(20)
     assert side_texture(column=grass, block_y=19) is FaceTexture.GRASS_SIDE

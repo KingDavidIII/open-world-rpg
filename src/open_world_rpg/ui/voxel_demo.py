@@ -102,6 +102,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="render-loop frame-rate target",
     )
     parser.add_argument(
+        "--vsync",
+        action="store_true",
+        help="request display synchronisation instead of the default responsive frame cap",
+    )
+    parser.add_argument(
         "--render-distance",
         type=_non_negative_integer,
         help="visible chunk radius",
@@ -134,6 +139,7 @@ def _config_from_arguments(
             render_distance=(0 if arguments.render_distance is None else arguments.render_distance),
             world_seed=arguments.world_seed,
             hidden_window=True,
+            vsync_enabled=arguments.vsync,
             terrain_config=TerrainGenerationConfig(octave_count=1),
             save_path=save_path,
             load_on_start=arguments.load_on_start,
@@ -145,6 +151,7 @@ def _config_from_arguments(
         height_pixels=720 if arguments.height is None else arguments.height,
         target_fps=60 if arguments.target_fps is None else arguments.target_fps,
         render_distance=1 if arguments.render_distance is None else arguments.render_distance,
+        vsync_enabled=arguments.vsync,
         world_seed=arguments.world_seed,
         save_path=save_path,
         load_on_start=arguments.load_on_start,

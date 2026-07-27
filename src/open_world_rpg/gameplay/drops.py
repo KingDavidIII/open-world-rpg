@@ -101,7 +101,7 @@ class PickupResult:
 class DroppedItemManager:
     """Ordered drop ownership, bounded physics, pickup, and despawning."""
 
-    def __init__(self, *, pickup_radius: float = 1.5, despawn_seconds: float = 300.0) -> None:
+    def __init__(self, *, pickup_radius: float = 2.25, despawn_seconds: float = 300.0) -> None:
         for name, value in (("pickup_radius", pickup_radius), ("despawn_seconds", despawn_seconds)):
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise TypeError(f"{name} must be a number.")

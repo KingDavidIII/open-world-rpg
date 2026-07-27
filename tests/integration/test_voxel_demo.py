@@ -83,7 +83,7 @@ def test_voxel_controls_targeting_and_shutdown_cleanup(
         pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_f))
         application.process_events()
         assert application.camera != original_camera
-        assert not application.show_help
+        assert application.show_help
         assert application.show_debug
         assert application.player.flying
 

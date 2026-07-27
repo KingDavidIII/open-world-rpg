@@ -10,7 +10,7 @@ from array import array
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, cast
 from uuid import UUID
 
 import moderngl
@@ -106,6 +106,9 @@ class VoxelContextUnavailableError(VoxelPrototypeError):
     """Raised only when SDL cannot provide the required OpenGL context."""
 
 
+HUD_REFRESH_INTERVAL_SECONDS: Final = 0.1
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VoxelPrototypeConfig:
     """Conservative desktop defaults for synchronous voxel streaming."""
@@ -116,6 +119,7 @@ class VoxelPrototypeConfig:
     render_distance: int = 1
     world_seed: int = 0
     hidden_window: bool = False
+    vsync_enabled: bool = False
     interaction_reach: float = 5.5
     break_cooldown: float = 0.18
     placement_cooldown: float = 0.18
@@ -143,6 +147,8 @@ class VoxelPrototypeConfig:
                 raise ValueError(f"{name} must be between {minimum} and {maximum}.")
         if not isinstance(self.hidden_window, bool):
             raise TypeError("hidden_window must be a boolean.")
+        if not isinstance(self.vsync_enabled, bool):
+            raise TypeError("vsync_enabled must be a boolean.")
         if not isinstance(self.terrain_config, TerrainGenerationConfig):
             raise TypeError("terrain_config must be a TerrainGenerationConfig.")
         for name, numeric_value in (
@@ -359,7 +365,7 @@ class VoxelPrototypeApplication:
         self.fps = 0.0
         self.render_distance = self.config.render_distance
         self.loading = False
-        self.show_help = True
+        self.show_help = False
         self.show_debug = False
         self.mouse_captured = False
         self.target: RayHit | None = None
@@ -395,6 +401,7 @@ class VoxelPrototypeApplication:
         self._stream_signature: tuple[int, int, int] | None = None
         self._generation_seconds = 0.0
         self._mesh_seconds = 0.0
+        self._next_hud_refresh = float("-inf")
 
     @property
     def hotbar(self) -> VoxelHotbar:
@@ -425,7 +432,7 @@ class VoxelPrototypeApplication:
             pygame.display.set_mode(
                 (self.config.width_pixels, self.config.height_pixels),
                 flags,
-                vsync=1,
+                vsync=int(self.config.vsync_enabled),
             )
             pygame.event.clear()
             self.context = moderngl.create_context(require=330)
@@ -971,20 +978,20 @@ class VoxelPrototypeApplication:
         self.dropped_items = DroppedItemManager()
         self.progression = SurvivalProgression()
         if self.config.progression_enabled:
-            spawn_y = safe_spawn_height(
-                world_x=self.spawn_x,
-                world_z=self.spawn_z,
-                height_at=self._height_at,
-            )
-            for offset_x, offset_z in ((2.0, 0.0), (-1.75, 1.5), (0.0, -2.25)):
+            forward_x, _, forward_z = self.camera.forward
+            right_x, _, right_z = self.camera.right
+            for distance, lateral in ((2.25, -0.7), (2.7, 0.0), (2.25, 0.7)):
+                position_x = self.spawn_x + 0.5 + forward_x * distance + right_x * lateral
+                position_z = self.spawn_z + 0.5 + forward_z * distance + right_z * lateral
+                local_floor = safe_spawn_height(
+                    world_x=math.floor(position_x),
+                    world_z=math.floor(position_z),
+                    height_at=self._height_at,
+                )
                 self.dropped_items.spawn(
                     item=ItemType.WOOD_LOG,
                     quantity=1,
-                    position=(
-                        self.spawn_x + 0.5 + offset_x,
-                        spawn_y + 0.35,
-                        self.spawn_z + 0.5 + offset_z,
-                    ),
+                    position=(position_x, local_floor + 0.35, position_z),
                 )
         self.vitals = PlayerVitals()
         self.last_interaction = InteractionResult.NONE
@@ -1928,6 +1935,18 @@ class VoxelPrototypeApplication:
             or self._font is None
         ):
             return
+        now = pygame.time.get_ticks() / 1000.0
+        if (
+            self.hud_snapshot is not None
+            and not self.flow.overlay_active
+            and now < self._next_hud_refresh
+        ):
+            self.context.disable(moderngl.DEPTH_TEST)
+            self._hud_texture.use(location=1)
+            self._hud_array.render(moderngl.TRIANGLES)
+            self.context.enable(moderngl.DEPTH_TEST)
+            return
+        self._next_hud_refresh = now + HUD_REFRESH_INTERVAL_SECONDS
         active = sum(
             self.runtime.metadata_at(coordinate).state is ChunkState.ACTIVE
             for coordinate in self.runtime.coordinates()

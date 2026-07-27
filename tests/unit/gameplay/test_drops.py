@@ -18,6 +18,7 @@ from open_world_rpg.gameplay import (
 
 def test_drop_creation_identity_snapshot_and_validation() -> None:
     manager = DroppedItemManager()
+    assert manager.pickup_radius == pytest.approx(2.25)
     first = manager.spawn(item=ItemType.STONE_BLOCK, quantity=1, position=(-1.5, 4.5, -2.5))
     second = manager.spawn(item=ItemType.DIRT_BLOCK, quantity=2, position=(0.5, 2.0, 0.5))
     assert (first.identifier, second.identifier) == (1, 2)
