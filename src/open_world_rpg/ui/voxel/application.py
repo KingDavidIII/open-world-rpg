@@ -54,6 +54,7 @@ from .collision import (
     ray_cast,
     safe_spawn_height,
 )
+from .controls import DEFAULT_CONTROL_HINTS, normalise_movement_axes
 from .editable_world import EditableVoxelWorld
 from .hotbar import VoxelHotbar
 from .hud import VoxelHudSnapshot
@@ -289,6 +290,7 @@ class VoxelPrototypeApplication:
             edits=self.edits,
             break_cooldown=self.config.break_cooldown,
             placement_cooldown=self.config.placement_cooldown,
+            maximum_reach=self.config.interaction_reach,
         )
         self.inventory = create_bootstrap_inventory(enabled=self.config.bootstrap_inventory)
         self.mining = TimedMiningController()
@@ -316,6 +318,8 @@ class VoxelPrototypeApplication:
         self.show_debug = False
         self.mouse_captured = False
         self.target: RayHit | None = None
+        self.break_preview = InteractionOutcome(result=InteractionResult.NO_TARGET)
+        self.placement_preview = InteractionOutcome(result=InteractionResult.NO_TARGET)
         self.context: moderngl.Context | None = None
         self.program: moderngl.Program | None = None
         self._overlay_program: moderngl.Program | None = None
@@ -534,6 +538,10 @@ class VoxelPrototypeApplication:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
+            elif event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
+                if self.mouse_captured:
+                    self._capture_mouse(False)
+                    capture_just_lost = True
             elif event.type == pygame.MOUSEMOTION and self.mouse_captured:
                 self.camera = self.camera.looked(
                     delta_x=float(event.rel[0]), delta_y=float(event.rel[1])
@@ -601,7 +609,10 @@ class VoxelPrototypeApplication:
                         self.dirty = True
                         self._selection_changed_at = pygame.time.get_ticks() / 1000.0
                 elif event.button == 1:
-                    self._mining_held = True
+                    self._refresh_interaction_previews()
+                    self._mining_held = self.break_preview.allowed
+                    if not self._mining_held:
+                        self._apply_interaction(self.break_preview)
                 elif event.button == 3:
                     self._mining_held = False
                     self.mining.cancel("block placement began")
@@ -620,12 +631,15 @@ class VoxelPrototypeApplication:
     def update(self, delta_seconds: float) -> None:
         """Apply first-person motion, physics, targeting, and streaming."""
         keys = pygame.key.get_pressed()
-        forward = int(keys[pygame.K_w]) - int(keys[pygame.K_s])
-        sideways = int(keys[pygame.K_d]) - int(keys[pygame.K_a])
+        gameplay_active = self.mouse_captured
+        raw_forward = int(keys[pygame.K_w]) - int(keys[pygame.K_s]) if gameplay_active else 0
+        raw_sideways = int(keys[pygame.K_d]) - int(keys[pygame.K_a]) if gameplay_active else 0
+        axes = normalise_movement_axes(forward=raw_forward, sideways=raw_sideways)
         microseconds = max(0, round(delta_seconds * 1_000_000))
         sprinting = bool(
-            keys[pygame.K_LSHIFT]
-            and (forward or sideways)
+            gameplay_active
+            and keys[pygame.K_LSHIFT]
+            and axes.active
             and not self.player.flying
             and self.vitals.can_sprint
         )
@@ -636,12 +650,12 @@ class VoxelPrototypeApplication:
         speed = (10.0 if sprinting else 5.0) * delta_seconds
         flat_forward = (math.sin(math.radians(self.camera.yaw_degrees)), 0.0)
         flat_right = (math.cos(math.radians(self.camera.yaw_degrees)), 0.0)
-        delta_x = (flat_forward[0] * forward + flat_right[0] * sideways) * speed
+        delta_x = (flat_forward[0] * axes.forward + flat_right[0] * axes.sideways) * speed
         delta_z = (
-            -math.cos(math.radians(self.camera.yaw_degrees)) * forward
-            + math.sin(math.radians(self.camera.yaw_degrees)) * sideways
+            -math.cos(math.radians(self.camera.yaw_degrees)) * axes.forward
+            + math.sin(math.radians(self.camera.yaw_degrees)) * axes.sideways
         ) * speed
-        jump_pressed = bool(keys[pygame.K_SPACE])
+        jump_pressed = bool(gameplay_active and keys[pygame.K_SPACE])
         jump_requested = (
             jump_pressed
             and not self._jump_was_pressed
@@ -687,7 +701,9 @@ class VoxelPrototypeApplication:
             jump=jump_allowed,
         )
         if self.player.flying:
-            vertical = int(keys[pygame.K_SPACE]) - int(keys[pygame.K_LCTRL] or keys[pygame.K_RCTRL])
+            vertical = int(jump_pressed) - int(
+                gameplay_active and (keys[pygame.K_LCTRL] or keys[pygame.K_RCTRL])
+            )
             self.player = PlayerState(
                 x=self.player.x,
                 y=self.player.y + vertical * speed,
@@ -725,6 +741,7 @@ class VoxelPrototypeApplication:
             block_at=self.editable_world.material_at,
             maximum_distance=self.config.interaction_reach,
         )
+        self._refresh_interaction_previews()
         self._update_mining(microseconds)
 
     def render(self) -> None:
@@ -783,7 +800,27 @@ class VoxelPrototypeApplication:
                 water_array.render(moderngl.TRIANGLES)
         cast(Any, self.context).depth_mask = True
         if self.target is not None:
-            self._render_target_outline(self.target)
+            target_colour = (
+                (1.0, 0.93, 0.32, 1.0) if self.break_preview.allowed else (1.0, 0.35, 0.28, 1.0)
+            )
+            self._render_target_outline(self.target, colour=target_colour)
+        selected_stack = self.inventory.selected_stack
+        if selected_stack is not None and self.placement_preview.coordinate is not None:
+            destination = self.placement_preview.coordinate
+            placement_colour = (
+                (0.30, 0.95, 0.48, 1.0)
+                if self.placement_preview.allowed
+                else (1.0, 0.30, 0.24, 1.0)
+            )
+            self._render_target_outline(
+                RayHit(
+                    x=destination.x,
+                    y=destination.y,
+                    z=destination.z,
+                    distance=0.0,
+                ),
+                colour=placement_colour,
+            )
         if (
             self._feedback_coordinate is not None
             and pygame.time.get_ticks() / 1000.0 < self._feedback_until
@@ -794,14 +831,15 @@ class VoxelPrototypeApplication:
                     y=self._feedback_coordinate.y,
                     z=self._feedback_coordinate.z,
                     distance=0.0,
-                )
+                ),
+                colour=(0.35, 0.90, 1.0, 1.0),
             )
         if self._crosshair_array is not None:
             self.context.disable(moderngl.DEPTH_TEST)
             self._crosshair_array.render(moderngl.LINES)
             self.context.enable(moderngl.DEPTH_TEST)
         self._render_hud(triangles)
-        pygame.display.set_caption("Open World RPG — Voxel Prototype")
+        pygame.display.set_caption(self._caption(triangles))
         pygame.display.flip()
 
     def shutdown(self) -> None:
@@ -1031,14 +1069,50 @@ class VoxelPrototypeApplication:
     def _solid_at(self, world_x: int, world_y: int, world_z: int) -> bool:
         return self.editable_world.solid_at(world_x, world_y, world_z)
 
+    def _selected_placement_material(self) -> BlockMaterial | None:
+        stack = self.inventory.selected_stack
+        return None if stack is None else material_for_item(stack.item)
+
+    def _refresh_interaction_previews(self) -> None:
+        self.break_preview = self.interactions.preview_break(target=self.target)
+        self.placement_preview = self.interactions.preview_place(
+            target=self.target,
+            material=self._selected_placement_material(),
+            player=self.player,
+        )
+
+    def _interaction_prompt(self) -> str:
+        if not self.mouse_captured:
+            return "Click to capture the mouse and resume controls"
+        if self.target is None:
+            return "Aim at a block within reach"
+        target_name = self.target.material.value.replace("_", " ").title()
+        mining_prompt = (
+            f"Hold LMB to mine {target_name}"
+            if self.break_preview.allowed
+            else f"Mining: {self.break_preview.result.value}"
+        )
+        selected = self.inventory.selected_slot
+        if isinstance(selected, ItemStack):
+            if self.placement_preview.allowed:
+                return f"{mining_prompt}  |  RMB to place {selected.item.display_name}"
+            return f"{mining_prompt}  |  Placement: {self.placement_preview.result.value}"
+        if selected is not None and self.break_preview.allowed:
+            return f"{mining_prompt} with {selected.item.display_name}"
+        if selected is not None:
+            return f"{mining_prompt}  |  Selected {selected.item.display_name}"
+        return f"{mining_prompt}  |  Select a block to place"
+
     def _apply_interaction(self, outcome: InteractionOutcome) -> None:
         self.last_interaction = outcome.result
         if outcome.result is InteractionResult.PLACED:
             self.last_placement_consumption = "consumed 1 selected item"
         self.save_message = ""
         if not outcome.changed:
-            if outcome.result is InteractionResult.PLAYER_INTERSECTION:
+            if outcome.result not in (InteractionResult.NONE, InteractionResult.COOLDOWN):
+                self.save_message = outcome.result.value.capitalize()
                 self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+            self._refresh_interaction_previews()
             return
         if (
             outcome.result is InteractionResult.BROKEN
@@ -1069,11 +1143,17 @@ class VoxelPrototypeApplication:
             block_at=self.editable_world.material_at,
             maximum_distance=self.config.interaction_reach,
         )
+        self._refresh_interaction_previews()
 
     def _update_mining(self, microseconds: int) -> None:
         if not self._mining_held or not self.mouse_captured or self.target is None:
             if self.mining.snapshot.status is MiningStatus.ACTIVE:
                 self.mining.cancel("target unavailable")
+            return
+        self.break_preview = self.interactions.preview_break(target=self.target)
+        if not self.break_preview.allowed:
+            if self.mining.snapshot.status is MiningStatus.ACTIVE:
+                self.mining.cancel(self.break_preview.result.value)
             return
         target = self.target
         snapshot = self.mining.snapshot
@@ -1120,6 +1200,7 @@ class VoxelPrototypeApplication:
             grounded=True,
         )
         self.target = None
+        self._refresh_interaction_previews()
         self.dirty = True
         self.save_message = "You died \N{EM DASH} respawned"
         self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.5
@@ -1198,6 +1279,7 @@ class VoxelPrototypeApplication:
             edits=self.edits,
             break_cooldown=self.config.break_cooldown,
             placement_cooldown=self.config.placement_cooldown,
+            maximum_reach=self.config.interaction_reach,
         )
         affected = {
             chunk for coordinate in changed for chunk in invalidated_chunks_for_edit(coordinate)
@@ -1225,6 +1307,7 @@ class VoxelPrototypeApplication:
             block_at=self.editable_world.material_at,
             maximum_distance=self.config.interaction_reach,
         )
+        self._refresh_interaction_previews()
         self.dirty = False
         self.save_message = "World loaded"
         self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
@@ -1291,7 +1374,12 @@ class VoxelPrototypeApplication:
         if captured:
             pygame.mouse.get_rel()
 
-    def _render_target_outline(self, target: RayHit) -> None:
+    def _render_target_outline(
+        self,
+        target: RayHit,
+        *,
+        colour: tuple[float, float, float, float] = (1.0, 0.93, 0.32, 1.0),
+    ) -> None:
         if self._target_buffer is None or self._target_array is None:
             return
         epsilon = 0.003
@@ -1323,17 +1411,18 @@ class VoxelPrototypeApplication:
         )
         data = array("f")
         for start, end in edges:
-            data.extend((*corners[start], 1.0, 0.93, 0.32, 1.0))
-            data.extend((*corners[end], 1.0, 0.93, 0.32, 1.0))
+            data.extend((*corners[start], *colour))
+            data.extend((*corners[end], *colour))
         self._target_buffer.write(data.tobytes())
         self._target_array.render(moderngl.LINES)
 
     def _caption(self, triangles: int) -> str:
         status = " | loading" if self.loading else ""
         mode = "FLY" if self.player.flying else "WALK"
-        basic = f"Open World RPG Voxel | {self.fps:4.0f} FPS | {mode}{status}"
+        input_state = "PLAY" if self.mouse_captured else "CURSOR"
+        basic = f"Open World RPG Voxel | {self.fps:4.0f} FPS | {mode} | {input_state}{status}"
         if self.show_help:
-            basic += " | WASD move, mouse look, Space jump/up, Ctrl down, F fly, F3 debug"
+            basic += " | F1 controls | Esc releases mouse"
         if not self.show_debug:
             return basic
         chunk = ChunkCoordinate(
@@ -1422,6 +1511,19 @@ class VoxelPrototypeApplication:
             last_fall_damage=self.vitals.snapshot.last_fall_damage,
             death_count=self.vitals.snapshot.death_count,
             vitals_revision=self.vitals.snapshot.revision,
+            mouse_captured=self.mouse_captured,
+            break_preview=self.break_preview.result.value,
+            placement_preview=self.placement_preview.result.value,
+            placement_target=(
+                None
+                if self.placement_preview.coordinate is None
+                else (
+                    self.placement_preview.coordinate.x,
+                    self.placement_preview.coordinate.y,
+                    self.placement_preview.coordinate.z,
+                )
+            ),
+            interaction_prompt=self._interaction_prompt(),
         )
         hud = self.hud_snapshot
         lines = [f"{hud.fps:4.0f} FPS"]
@@ -1439,7 +1541,11 @@ class VoxelPrototypeApplication:
                     f"Selected {hud.selected_material.value if hud.selected_material else 'empty'}",
                     f"Target {hud.target or 'none'} "
                     f"{hud.target_material.value if hud.target_material else ''} "
-                    f"face {hud.target_face or 'none'}",
+                    f"face {hud.target_face or 'none'} "
+                    f"distance {hud.target_distance:.2f}"
+                    if hud.target_distance is not None
+                    else "Target none",
+                    f"Preview mine={hud.break_preview} place={hud.placement_preview}",
                     f"Edits {hud.edited_block_count}  Revision {hud.edit_revision}",
                     f"Interaction {hud.last_interaction}",
                     f"Inventory {hud.total_inventory_items} items / {hud.occupied_slots} slots "
@@ -1483,11 +1589,61 @@ class VoxelPrototypeApplication:
                 (8, 6 + index * 22),
             )
         self._draw_hotbar(surface)
+        self._draw_interaction_prompt(surface, hud.interaction_prompt)
+        if self.show_help:
+            self._draw_help_panel(surface)
+        if not hud.mouse_captured:
+            self._draw_capture_prompt(surface)
         self._hud_texture.write(pygame.image.tobytes(surface, "RGBA", True))
         self.context.disable(moderngl.DEPTH_TEST)
         self._hud_texture.use(location=1)
         self._hud_array.render(moderngl.TRIANGLES)
         self.context.enable(moderngl.DEPTH_TEST)
+
+    def _draw_help_panel(self, surface: pygame.Surface) -> None:
+        if self._font is None:
+            return
+        font = self._font
+        panel = pygame.Rect(706, 18, 300, 286)
+        pygame.draw.rect(surface, (8, 13, 20, 205), panel, border_radius=8)
+        pygame.draw.rect(surface, (98, 116, 128, 220), panel, 2, border_radius=8)
+        title = font.render("CONTROLS", True, (255, 236, 160))
+        surface.blit(title, (panel.x + 12, panel.y + 10))
+        for index, hint in enumerate(DEFAULT_CONTROL_HINTS):
+            y = panel.y + 38 + index * 22
+            binding = font.render(hint.binding, True, (130, 207, 255))
+            action = font.render(hint.action, True, (235, 240, 235))
+            surface.blit(binding, (panel.x + 12, y))
+            surface.blit(action, (panel.x + 132, y))
+
+    def _draw_interaction_prompt(self, surface: pygame.Surface, prompt: str) -> None:
+        if self._font is None or not prompt:
+            return
+        text = self._font.render(prompt, True, (245, 245, 235))
+        padding = 8
+        rect = pygame.Rect(
+            surface.get_width() // 2 - text.get_width() // 2 - padding,
+            326,
+            text.get_width() + padding * 2,
+            text.get_height() + padding,
+        )
+        pygame.draw.rect(surface, (8, 13, 20, 195), rect, border_radius=6)
+        surface.blit(text, (rect.x + padding, rect.y + 4))
+
+    def _draw_capture_prompt(self, surface: pygame.Surface) -> None:
+        if self._font is None:
+            return
+        title = self._font.render("CLICK TO RESUME", True, (255, 236, 160))
+        detail = self._font.render(
+            "Gameplay input is paused while the cursor is free",
+            True,
+            (235, 240, 235),
+        )
+        panel = pygame.Rect(288, 190, 448, 78)
+        pygame.draw.rect(surface, (8, 13, 20, 225), panel, border_radius=10)
+        pygame.draw.rect(surface, (255, 236, 160, 230), panel, 2, border_radius=10)
+        surface.blit(title, (512 - title.get_width() // 2, panel.y + 12))
+        surface.blit(detail, (512 - detail.get_width() // 2, panel.y + 42))
 
     def _draw_hotbar(self, surface: pygame.Surface) -> None:
         if self._font is None:

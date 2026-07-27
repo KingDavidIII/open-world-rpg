@@ -583,6 +583,7 @@ def test_successful_interaction_releases_only_invalidated_cached_meshes(
             result=InteractionResult.BROKEN,
             coordinate=WorldBlockCoordinate(x=0, y=1, z=0),
             invalidated_chunks=(affected, ChunkCoordinate(x=9, y=9)),
+            dropped_item=ItemType.STONE_BLOCK,
         )
     )
     assert removed.released
@@ -594,6 +595,17 @@ def test_successful_interaction_releases_only_invalidated_cached_meshes(
         InteractionOutcome(result=InteractionResult.PLAYER_INTERSECTION)
     )
     assert application.last_interaction is InteractionResult.PLAYER_INTERSECTION
+    application._apply_interaction(  # type: ignore[attr-defined]
+        InteractionOutcome(result=InteractionResult.COOLDOWN)
+    )
+    assert application.save_message == ""
+    application._apply_interaction(  # type: ignore[attr-defined]
+        InteractionOutcome(
+            result=InteractionResult.PLACED,
+            coordinate=WorldBlockCoordinate(x=1, y=2, z=3),
+        )
+    )
+    assert application.last_placement_consumption == "consumed 1 selected item"
 
 
 def test_voxel_save_load_is_atomic_dirty_and_world_scoped(
@@ -702,13 +714,21 @@ def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths(
     application = VoxelPrototypeApplication()
     application.show_help = True
     application.show_debug = False
-    assert "WASD move" in application._caption(0)  # type: ignore[attr-defined]
+    assert "CURSOR" in application._caption(0)  # type: ignore[attr-defined]
+    assert "F1 controls" in application._caption(0)  # type: ignore[attr-defined]
+    application.mouse_captured = True
+    assert "PLAY" in application._caption(0)  # type: ignore[attr-defined]
+    application.mouse_captured = False
     application.show_debug = True
     application.target = RayHit(x=1, y=2, z=3, distance=4.0)
     assert "target 1,2,3" in application._caption(12)  # type: ignore[attr-defined]
 
+    blank_surface = pygame.Surface((1024, 512), pygame.SRCALPHA)
     application._render_hud(0)  # type: ignore[attr-defined]
-    application._draw_hotbar(pygame.Surface((1024, 512), pygame.SRCALPHA))  # type: ignore[attr-defined]
+    application._draw_hotbar(blank_surface)  # type: ignore[attr-defined]
+    application._draw_help_panel(blank_surface)  # type: ignore[attr-defined]
+    application._draw_interaction_prompt(blank_surface, "")  # type: ignore[attr-defined]
+    application._draw_capture_prompt(blank_surface)  # type: ignore[attr-defined]
 
     class Resource:
         def write(self, _data: bytes) -> None:
@@ -748,9 +768,16 @@ def test_caption_and_hud_cover_help_debug_loading_and_uninitialised_paths(
         tool=application.inventory.selected_tool,
     )
     application.mining.advance(100_000)
+    application.inventory.select_hotbar(2)
+    application._refresh_interaction_previews()  # type: ignore[attr-defined]
     application._render_hud(12)  # type: ignore[attr-defined]
     assert application.hud_snapshot is not None
     assert application.hud_snapshot.loading
+    assert application.hud_snapshot.placement_target is not None
+    application.mouse_captured = True
+    application.target = None
+    application._refresh_interaction_previews()  # type: ignore[attr-defined]
+    application._render_hud(12)  # type: ignore[attr-defined]
 
 
 def test_stream_without_context_maintains_domain_cache_only() -> None:
@@ -919,3 +946,290 @@ def test_voxel_entry_point_reports_runtime_failure(
 
     monkeypatch.setattr(voxel_demo, "VoxelPrototypeApplication", Application)
     assert voxel_demo.main([]) == 1
+
+
+def test_window_focus_loss_releases_mouse_and_cancels_mining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.running = True
+    application.mouse_captured = True
+    application._mining_held = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(pygame.event, "set_grab", lambda _captured: None)
+    monkeypatch.setattr(pygame.mouse, "set_visible", lambda _visible: None)
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [pygame.event.Event(pygame.WINDOWFOCUSLOST)],
+    )
+
+    application.process_events()
+
+    assert not application.mouse_captured
+    assert not application._mining_held  # type: ignore[attr-defined]
+    assert application.running
+
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [pygame.event.Event(pygame.WINDOWFOCUSLOST)],
+    )
+    application.process_events()
+    assert not application.mouse_captured
+
+
+def test_update_normalises_diagonal_motion_and_pauses_input_with_free_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.mouse_captured = True
+    application.player = PlayerState(x=8.0, y=20.0, z=8.0, grounded=True)
+    captured_moves: list[dict[str, object]] = []
+
+    class Keys:
+        def __getitem__(self, key: int) -> bool:
+            return key in {
+                pygame.K_w,
+                pygame.K_d,
+                pygame.K_LSHIFT,
+                pygame.K_SPACE,
+            }
+
+    def capture_move(**kwargs: object) -> PlayerState:
+        captured_moves.append(kwargs)
+        return application.player
+
+    monkeypatch.setattr(pygame.key, "get_pressed", Keys)
+    monkeypatch.setattr(voxel_application, "move_player", capture_move)
+    monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
+
+    application.update(0.01)
+
+    first = captured_moves[-1]
+    diagonal_distance = (float(first["delta_x"]) ** 2 + float(first["delta_z"]) ** 2) ** 0.5
+    assert diagonal_distance == pytest.approx(0.1)
+    assert first["jump"] is True
+
+    application.mouse_captured = False
+    application._jump_was_pressed = False  # type: ignore[attr-defined]
+    application.update(0.01)
+
+    paused = captured_moves[-1]
+    assert paused["delta_x"] == 0.0
+    assert paused["delta_z"] == 0.0
+    assert paused["jump"] is False
+
+
+def test_contextual_interaction_prompt_covers_capture_target_tool_block_and_empty_slot() -> None:
+    application = VoxelPrototypeApplication()
+    assert "Click to capture" in application._interaction_prompt()  # type: ignore[attr-defined]
+
+    application.mouse_captured = True
+    assert "Aim at a block" in application._interaction_prompt()  # type: ignore[attr-defined]
+
+    application.target = RayHit(
+        x=0,
+        y=40,
+        z=0,
+        distance=1.0,
+        material=BlockMaterial.GRASS,
+        face_normal=(0, 1, 0),
+    )
+    application._refresh_interaction_previews()  # type: ignore[attr-defined]
+    assert "Wooden Pickaxe" in application._interaction_prompt()  # type: ignore[attr-defined]
+
+    application.inventory.select_hotbar(2)
+    application._refresh_interaction_previews()  # type: ignore[attr-defined]
+    prompt = application._interaction_prompt()  # type: ignore[attr-defined]
+    assert "RMB to place Grass Block" in prompt
+
+    application.target = RayHit(
+        x=0,
+        y=4,
+        z=0,
+        distance=1.0,
+        material=BlockMaterial.GRASS,
+        face_normal=(0, -1, 0),
+    )
+    application._refresh_interaction_previews()  # type: ignore[attr-defined]
+    assert "placement destination occupied" in application._interaction_prompt()  # type: ignore[attr-defined]
+
+    application.inventory.select_hotbar(7)
+    application._refresh_interaction_previews()  # type: ignore[attr-defined]
+    assert "Select a block to place" in application._interaction_prompt()  # type: ignore[attr-defined]
+
+
+def test_invalid_break_preview_cancels_active_mining() -> None:
+    application = VoxelPrototypeApplication()
+    application.mouse_captured = True
+    application._mining_held = True  # type: ignore[attr-defined]
+    application.target = RayHit(
+        x=0,
+        y=5,
+        z=0,
+        distance=1.0,
+        material=BlockMaterial.WATER,
+    )
+    application._refresh_interaction_previews()  # type: ignore[attr-defined]
+    application._update_mining(1)  # type: ignore[attr-defined]
+    assert application.mining.snapshot.status is MiningStatus.IDLE
+
+    application.mining.begin(
+        target=application.target.coordinate,
+        material=BlockMaterial.STONE,
+        tool=application.inventory.selected_tool,
+    )
+    application._update_mining(1)  # type: ignore[attr-defined]
+
+    assert application.mining.snapshot.status is MiningStatus.CANCELLED
+    assert application.mining.snapshot.last_cancellation_reason == InteractionResult.WATER.value
+    assert "Mining: water cannot be broken" in application._interaction_prompt()  # type: ignore[attr-defined]
+
+
+def test_invalid_left_click_reports_preview_without_starting_mining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.mouse_captured = True
+    application.target = RayHit(
+        x=0,
+        y=5,
+        z=0,
+        distance=1.0,
+        material=BlockMaterial.WATER,
+    )
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1)],
+    )
+
+    application.process_events()
+
+    assert not application._mining_held  # type: ignore[attr-defined]
+    assert application.last_interaction is InteractionResult.WATER
+    assert application.save_message == "Water cannot be broken"
+
+
+def test_flying_vertical_input_respects_mouse_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    application.mouse_captured = True
+    application.player = PlayerState(x=8.0, y=20.0, z=8.0, flying=True)
+
+    class Keys:
+        def __getitem__(self, key: int) -> bool:
+            return key == pygame.K_LCTRL
+
+    monkeypatch.setattr(pygame.key, "get_pressed", Keys)
+    monkeypatch.setattr(voxel_application, "move_player", lambda **_kwargs: application.player)
+    monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
+
+    application.update(0.1)
+    captured_y = application.player.y
+    assert captured_y == pytest.approx(19.5)
+
+    application.mouse_captured = False
+    application.update(0.1)
+    assert application.player.y == captured_y
+
+
+def test_render_colours_valid_invalid_and_feedback_previews(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Uniform:
+        value: object = None
+
+        def write(self, _value: bytes) -> None:
+            return None
+
+    class Program:
+        def __init__(self) -> None:
+            self.uniforms: dict[str, Uniform] = {}
+
+        def __getitem__(self, name: str) -> Uniform:
+            return self.uniforms.setdefault(name, Uniform())
+
+    class Context:
+        viewport: tuple[int, int, int, int]
+        depth_mask = True
+
+        def clear(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def disable(self, _flag: int) -> None:
+            return None
+
+        def enable(self, _flag: int) -> None:
+            return None
+
+    application = VoxelPrototypeApplication()
+    application.context = cast(Any, Context())
+    application.program = cast(Any, Program())
+    application._visible = ()  # type: ignore[attr-defined]
+    application.inventory.select_hotbar(2)
+    application.target = RayHit(
+        x=0,
+        y=40,
+        z=0,
+        distance=1.0,
+        material=BlockMaterial.GRASS,
+        face_normal=(0, 1, 0),
+    )
+    application.break_preview = InteractionOutcome(
+        result=InteractionResult.BROKEN,
+        coordinate=application.target.coordinate,
+    )
+    application.placement_preview = InteractionOutcome(
+        result=InteractionResult.PLACED,
+        coordinate=WorldBlockCoordinate(x=0, y=41, z=0),
+    )
+    application._feedback_coordinate = WorldBlockCoordinate(x=1, y=2, z=3)  # type: ignore[attr-defined]
+    application._feedback_until = 2.0  # type: ignore[attr-defined]
+    colours: list[tuple[float, float, float, float]] = []
+
+    monkeypatch.setattr(pygame.display, "get_window_size", lambda: (1280, 720))
+    monkeypatch.setattr(pygame.display, "set_caption", lambda _caption: None)
+    monkeypatch.setattr(pygame.display, "flip", lambda: None)
+    monkeypatch.setattr(pygame.time, "get_ticks", lambda: 1000)
+    monkeypatch.setattr(application, "_refresh_drop_gpu", lambda: None)
+    monkeypatch.setattr(application, "_render_hud", lambda _triangles: None)
+    monkeypatch.setattr(
+        application,
+        "_render_target_outline",
+        lambda _target, *, colour=(1.0, 0.93, 0.32, 1.0): colours.append(colour),
+    )
+
+    application.render()
+    assert colours == [
+        (1.0, 0.93, 0.32, 1.0),
+        (0.30, 0.95, 0.48, 1.0),
+        (0.35, 0.90, 1.0, 1.0),
+    ]
+
+    colours.clear()
+    application.break_preview = InteractionOutcome(result=InteractionResult.WATER)
+    application.placement_preview = InteractionOutcome(
+        result=InteractionResult.OCCUPIED,
+        coordinate=WorldBlockCoordinate(x=0, y=39, z=0),
+    )
+    application._feedback_until = 0.5  # type: ignore[attr-defined]
+    application.render()
+    assert colours == [
+        (1.0, 0.35, 0.28, 1.0),
+        (1.0, 0.30, 0.24, 1.0),
+    ]
+
+    colours.clear()
+    application.inventory.select_hotbar(0)
+    application.target = None
+    application.placement_preview = InteractionOutcome(result=InteractionResult.NO_TARGET)
+    application.render()
+    assert colours == []

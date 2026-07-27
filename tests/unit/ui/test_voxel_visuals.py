@@ -224,6 +224,11 @@ def test_hud_snapshot_projects_negative_coordinates_and_modes() -> None:
         last_interaction="block placed",
         save_path="C:/saves/voxel.json",
         dirty=True,
+        mouse_captured=True,
+        break_preview="block broken",
+        placement_preview="block placed",
+        placement_target=(-1, 15, -17),
+        interaction_prompt="Hold LMB to mine",
     )
     assert snapshot.block == (-1, 14, -17)
     assert (snapshot.chunk.x, snapshot.chunk.y) == (-1, -2)
@@ -237,6 +242,27 @@ def test_hud_snapshot_projects_negative_coordinates_and_modes() -> None:
     assert snapshot.last_interaction == "block placed"
     assert snapshot.save_path == "C:/saves/voxel.json"
     assert snapshot.dirty
+    assert snapshot.mouse_captured
+    assert snapshot.target_distance == 1.0
+    assert snapshot.break_preview == "block broken"
+    assert snapshot.placement_preview == "block placed"
+    assert snapshot.placement_target == (-1, 15, -17)
+    assert snapshot.interaction_prompt == "Hold LMB to mine"
+
+    without_target = VoxelHudSnapshot.create(
+        fps=0,
+        player=PlayerState(x=0, y=0, z=0),
+        seed=0,
+        active_chunks=0,
+        cached_chunks=0,
+        mesh_count=0,
+        triangles=0,
+        render_distance=1,
+        target=None,
+        loading=False,
+    )
+    assert without_target.target_distance is None
+    assert without_target.interaction_prompt == "Click to capture the mouse"
 
 
 def test_mesh_vertex_layout_has_upward_top_face_winding() -> None:

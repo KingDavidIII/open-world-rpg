@@ -393,3 +393,117 @@ def test_validated_inventory_consumption_failure_is_explicit(
             player=PlayerState(x=4, y=4, z=4),
             now=0,
         )
+
+
+def test_interaction_previews_enforce_reach_without_mutating_world() -> None:
+    world, edits = make_world()
+    controller = VoxelInteractionController(
+        world=world,
+        edits=edits,
+        break_cooldown=0,
+        placement_cooldown=0,
+        maximum_reach=2.0,
+    )
+    assert controller.maximum_reach == 2.0
+    before = edits.snapshot()
+
+    too_far = hit()
+    too_far = RayHit(
+        x=too_far.x,
+        y=too_far.y,
+        z=too_far.z,
+        distance=2.01,
+        material=too_far.material,
+        face_normal=too_far.face_normal,
+    )
+    break_preview = controller.preview_break(target=too_far)
+    place_preview = controller.preview_place(
+        target=too_far,
+        material=BlockMaterial.STONE,
+        player=PlayerState(x=8, y=8, z=8),
+    )
+    assert break_preview.result is InteractionResult.OUT_OF_REACH
+    assert place_preview.result is InteractionResult.OUT_OF_REACH
+    assert not break_preview.allowed
+    assert edits.snapshot() == before
+    assert controller.break_block(target=too_far, now=0).result is InteractionResult.OUT_OF_REACH
+    assert (
+        controller.place_block(
+            target=too_far,
+            material=BlockMaterial.STONE,
+            player=PlayerState(x=8, y=8, z=8),
+            now=0,
+        ).result
+        is InteractionResult.OUT_OF_REACH
+    )
+    assert edits.snapshot() == before
+
+
+def test_interaction_previews_report_destination_and_all_invalid_target_forms() -> None:
+    world, edits = make_world()
+    controller = VoxelInteractionController(world=world, edits=edits, maximum_reach=2.0)
+    player = PlayerState(x=10.5, y=10.0, z=10.5)
+
+    assert controller.preview_break(target=None).result is InteractionResult.NO_TARGET
+    assert (
+        controller.preview_break(target=RayHit(x=0, y=4, z=0, distance=float("inf"))).result
+        is InteractionResult.OUT_OF_REACH
+    )
+    assert (
+        controller.preview_break(target=RayHit(x=0, y=4, z=0, distance=-0.1)).result
+        is InteractionResult.OUT_OF_REACH
+    )
+    assert (
+        controller.preview_break(target=hit(material=BlockMaterial.WATER)).result
+        is InteractionResult.WATER
+    )
+    assert (
+        controller.preview_break(target=hit(material=BlockMaterial.AIR)).result
+        is InteractionResult.NO_TARGET
+    )
+    valid_break = controller.preview_break(target=hit())
+    assert valid_break.allowed
+    assert valid_break.coordinate == hit().coordinate
+    assert valid_break.dropped_item is ItemType.GRASS_BLOCK
+
+    destination_hit = hit(coordinate=WorldBlockCoordinate(x=0, y=7, z=0))
+    empty = controller.preview_place(target=destination_hit, material=None, player=player)
+    air = controller.preview_place(
+        target=destination_hit,
+        material=BlockMaterial.AIR,
+        player=player,
+    )
+    water = controller.preview_place(
+        target=destination_hit,
+        material=BlockMaterial.WATER,
+        player=player,
+    )
+    assert empty.result is InteractionResult.EMPTY_SLOT
+    assert air.result is InteractionResult.EMPTY_SLOT
+    assert water.result is InteractionResult.EMPTY_SLOT
+    assert empty.coordinate == WorldBlockCoordinate(x=0, y=8, z=0)
+    valid_place = controller.preview_place(
+        target=destination_hit,
+        material=BlockMaterial.STONE,
+        player=player,
+    )
+    assert valid_place.allowed
+    assert valid_place.coordinate == WorldBlockCoordinate(x=0, y=8, z=0)
+    assert edits.snapshot().edits == ()
+
+    with pytest.raises(TypeError, match="player"):
+        controller.preview_place(
+            target=destination_hit,
+            material=BlockMaterial.STONE,
+            player=cast(Any, object()),
+        )
+
+
+def test_interaction_reach_constructor_validation() -> None:
+    world, edits = make_world()
+    with pytest.raises(TypeError, match="maximum_reach"):
+        VoxelInteractionController(world=world, edits=edits, maximum_reach=True)
+    with pytest.raises(ValueError, match="maximum_reach"):
+        VoxelInteractionController(world=world, edits=edits, maximum_reach=float("inf"))
+    with pytest.raises(ValueError, match="greater than zero"):
+        VoxelInteractionController(world=world, edits=edits, maximum_reach=0)

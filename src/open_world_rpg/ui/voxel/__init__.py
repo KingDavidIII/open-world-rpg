@@ -16,6 +16,12 @@ from .collision import (
     ray_cast,
     safe_spawn_height,
 )
+from .controls import (
+    DEFAULT_CONTROL_HINTS,
+    ControlHint,
+    MovementAxes,
+    normalise_movement_axes,
+)
 from .editable_world import MAX_EDITABLE_BLOCK_Y, MIN_EDITABLE_BLOCK_Y, EditableVoxelWorld
 from .hotbar import DEFAULT_HOTBAR_SLOTS, HOTBAR_SIZE, VoxelHotbar
 from .hud import VoxelHudSnapshot
@@ -32,6 +38,7 @@ from .streaming import streaming_chunks
 from .texture_atlas import FaceTexture, atlas_uv, generate_texture_atlas
 
 __all__ = [
+    "DEFAULT_CONTROL_HINTS",
     "DEFAULT_HOTBAR_SLOTS",
     "DISPLAY_SEA_LEVEL",
     "ELEVATION_METRES_PER_BLOCK",
@@ -41,11 +48,13 @@ __all__ = [
     "Aabb",
     "BlockColumn",
     "BlockType",
+    "ControlHint",
     "EditableVoxelWorld",
     "FaceTexture",
     "FirstPersonCamera",
     "InteractionOutcome",
     "InteractionResult",
+    "MovementAxes",
     "PlayerState",
     "RayHit",
     "SceneryKind",
@@ -62,6 +71,7 @@ __all__ = [
     "invalidated_chunks_for_edit",
     "mesh_cache_key",
     "move_player",
+    "normalise_movement_axes",
     "player_intersects_block",
     "ray_cast",
     "safe_spawn_height",

@@ -71,6 +71,32 @@ Or use the installed command:
 
     open-world-rpg
 
+Run the playable voxel prototype:
+
+    python -m open_world_rpg.ui.voxel_demo
+
+Or use the installed voxel command:
+
+    open-world-rpg-voxel-demo
+
+### Voxel controls
+
+- `W A S D`: move
+- `Mouse`: look
+- `Shift`: sprint
+- `Space`: jump or fly up
+- `Ctrl`: fly down
+- `Hold left mouse`: mine
+- `Right mouse`: place the selected block
+- `1-9` or mouse wheel: select a hotbar slot
+- `Escape`: release the mouse; press again to exit
+- `F1` or `H`: toggle the in-game control guide
+- `F3`: toggle diagnostics
+
+The current development candidate includes the v0.9.0 Sprint 1 core-playability
+work. The released package version remains v0.8.0 until the complete v0.9.0
+release cycle is prepared.
+
 ## Quality checks
 
     python -m ruff format .
