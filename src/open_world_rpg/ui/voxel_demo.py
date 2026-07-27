@@ -38,8 +38,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="save modified block edits after a clean shutdown",
     )
+    parser.add_argument(
+        "--direct-play",
+        action="store_true",
+        help="skip the main menu and enter the world immediately",
+    )
     arguments = parser.parse_args(argv)
-    if (arguments.load_on_start or arguments.autosave) and arguments.save_path is None:
+    save_path = arguments.save_path
+    if not arguments.smoke_test and save_path is None:
+        save_path = Path("saves/voxel.json")
+    if (arguments.load_on_start or arguments.autosave) and save_path is None:
         parser.error("--load and --autosave require --save-path")
     config = (
         VoxelPrototypeConfig(
@@ -49,15 +57,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             render_distance=0,
             hidden_window=True,
             terrain_config=TerrainGenerationConfig(octave_count=1),
-            save_path=arguments.save_path,
+            save_path=save_path,
             load_on_start=arguments.load_on_start,
             autosave=arguments.autosave,
         )
         if arguments.smoke_test
         else VoxelPrototypeConfig(
-            save_path=arguments.save_path,
+            save_path=save_path,
             load_on_start=arguments.load_on_start,
             autosave=arguments.autosave,
+            game_flow_enabled=not arguments.direct_play,
         )
     )
     try:

@@ -20,13 +20,16 @@ from open_world_rpg.application import GameMode, RuntimeContext, create_terrain_
 from open_world_rpg.application.save_service import GameSaveService
 from open_world_rpg.core import ProjectPaths
 from open_world_rpg.gameplay import (
+    CraftingResult,
     DroppedItemManager,
     ItemStack,
     ItemType,
     MiningStatus,
     PlayerVitals,
     TimedMiningController,
+    ToolInstance,
     create_bootstrap_inventory,
+    item_policy,
     material_for_item,
 )
 from open_world_rpg.persistence import RuntimeStorage, SaveRepository, SaveSlot
@@ -56,6 +59,7 @@ from .collision import (
 )
 from .controls import DEFAULT_CONTROL_HINTS, normalise_movement_axes
 from .editable_world import EditableVoxelWorld
+from .game_flow import GameFlowAction, GameFlowController, VoxelScreen
 from .hotbar import VoxelHotbar
 from .hud import VoxelHudSnapshot
 from .interaction import (
@@ -64,6 +68,7 @@ from .interaction import (
     VoxelInteractionController,
     invalidated_chunks_for_edit,
 )
+from .inventory_ui import InventoryScreenController
 from .item_rendering import build_dropped_item_vertices
 from .meshing import VoxelChunkMesh, build_chunk_mesh, mesh_cache_key
 from .scenery import scenery_at
@@ -115,6 +120,7 @@ class VoxelPrototypeConfig:
     load_on_start: bool = False
     autosave: bool = False
     bootstrap_inventory: bool = True
+    game_flow_enabled: bool = False
     terrain_config: TerrainGenerationConfig = field(
         default_factory=lambda: TerrainGenerationConfig(octave_count=2)
     )
@@ -141,6 +147,8 @@ class VoxelPrototypeConfig:
             raise TypeError("autosave must be a boolean.")
         if not isinstance(self.bootstrap_inventory, bool):
             raise TypeError("bootstrap_inventory must be a boolean.")
+        if not isinstance(self.game_flow_enabled, bool):
+            raise TypeError("game_flow_enabled must be a boolean.")
         if (self.load_on_start or self.autosave) and self.save_path is None:
             raise ValueError("load and autosave require a save_path.")
 
@@ -293,6 +301,13 @@ class VoxelPrototypeApplication:
             maximum_reach=self.config.interaction_reach,
         )
         self.inventory = create_bootstrap_inventory(enabled=self.config.bootstrap_inventory)
+        self.flow = GameFlowController(
+            initial_screen=(
+                VoxelScreen.MAIN_MENU if self.config.game_flow_enabled else VoxelScreen.PLAYING
+            ),
+            continue_available=self.save_path is not None and self.save_path.exists(),
+        )
+        self.inventory_screen = InventoryScreenController()
         self.mining = TimedMiningController()
         self.vitals = PlayerVitals()
         self._mining_held = False
@@ -493,7 +508,7 @@ class VoxelPrototypeApplication:
                 if not self._load_edits():
                     raise VoxelPrototypeError("Could not load the requested voxel save.")
             self._stream()
-            self._capture_mouse(True)
+            self._capture_mouse(self.flow.gameplay_active)
             self.running = True
         except Exception as error:
             self.shutdown()
@@ -534,8 +549,13 @@ class VoxelPrototypeApplication:
 
     def process_events(self) -> None:
         """Handle mouse capture and discrete prototype controls."""
+        events = pygame.event.get()
+        if self.config.game_flow_enabled:
+            for event in events:
+                self._process_flow_event(event)
+            return
         capture_just_lost = False
-        for event in pygame.event.get():
+        for event in events:
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
@@ -628,8 +648,306 @@ class VoxelPrototypeApplication:
                 self._mining_held = False
                 self.mining.cancel("mining input released")
 
+    def _process_flow_event(self, event: Any) -> None:
+        """Route one event through the active menu, inventory, or gameplay screen."""
+        if event.type == pygame.QUIT:
+            self.running = False
+            return
+        if self.flow.screen is VoxelScreen.PLAYING:
+            self._process_flow_gameplay_event(event)
+            return
+        if event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
+            self._capture_mouse(False)
+            return
+        if event.type == pygame.KEYDOWN:
+            self._process_overlay_key(event.key)
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            self._process_overlay_click(event)
+        elif event.type == pygame.MOUSEWHEEL and self.flow.screen is VoxelScreen.INVENTORY:
+            self.inventory_screen.move_recipe_selection(-event.y)
+
+    def _process_flow_gameplay_event(self, event: Any) -> None:
+        """Handle gameplay controls while the v0.9.0 screen flow is enabled."""
+        if event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
+            self._open_pause_menu()
+        elif event.type == pygame.MOUSEMOTION and self.mouse_captured:
+            self.camera = self.camera.looked(
+                delta_x=float(event.rel[0]), delta_y=float(event.rel[1])
+            )
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                self._open_pause_menu()
+            elif event.key in (pygame.K_e, pygame.K_TAB):
+                self._open_inventory_screen()
+            elif event.key in (pygame.K_F1, pygame.K_h):
+                self.show_help = not self.show_help
+            elif event.key == pygame.K_F3:
+                self.show_debug = not self.show_debug
+            elif event.key == pygame.K_f:
+                self.player = PlayerState(
+                    x=self.player.x,
+                    y=self.player.y,
+                    z=self.player.z,
+                    flying=not self.player.flying,
+                )
+            elif event.key == pygame.K_r:
+                self._place_player_at_spawn()
+            elif event.key == pygame.K_F5:
+                self.render_distance = max(1, self.render_distance - 1)
+                self._stream_signature = None
+                self._stream()
+            elif event.key == pygame.K_F6:
+                self.render_distance = min(4, self.render_distance + 1)
+                self._stream_signature = None
+                self._stream()
+            elif event.key == pygame.K_F7:
+                self._save_edits()
+            elif event.key == pygame.K_F8:
+                self._load_edits()
+            elif pygame.K_1 <= event.key <= pygame.K_9 and self.inventory.select_hotbar(
+                event.key - pygame.K_1
+            ):
+                self._on_inventory_changed("selected tool changed")
+        elif event.type == pygame.MOUSEWHEEL:
+            if self.inventory.cycle_hotbar(event.y):
+                self._on_inventory_changed("selected tool changed")
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            if not self.mouse_captured:
+                self._capture_mouse(True)
+            elif event.button in (4, 5):
+                if self.inventory.cycle_hotbar(1 if event.button == 4 else -1):
+                    self._on_inventory_changed("selected tool changed")
+            elif event.button == 1:
+                self._refresh_interaction_previews()
+                self._mining_held = self.break_preview.allowed
+                if not self._mining_held:
+                    self._apply_interaction(self.break_preview)
+            elif event.button == 3:
+                self._mining_held = False
+                self.mining.cancel("block placement began")
+                self._apply_interaction(
+                    self.interactions.place_inventory_block(
+                        target=self.target,
+                        inventory=self.inventory,
+                        player=self.player,
+                        now=pygame.time.get_ticks() / 1000.0,
+                    )
+                )
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            self._mining_held = False
+            self.mining.cancel("mining input released")
+
+    def _process_overlay_key(self, key: int) -> None:
+        if self.flow.screen is VoxelScreen.INVENTORY:
+            if key in (pygame.K_ESCAPE, pygame.K_e, pygame.K_TAB):
+                self.flow.close_inventory()
+                self._capture_mouse(True)
+            elif key == pygame.K_LEFT:
+                self.inventory_screen.move_slot_selection(columns=9, delta_x=-1, delta_y=0)
+            elif key == pygame.K_RIGHT:
+                self.inventory_screen.move_slot_selection(columns=9, delta_x=1, delta_y=0)
+            elif key == pygame.K_UP:
+                self.inventory_screen.move_slot_selection(columns=9, delta_x=0, delta_y=-1)
+            elif key == pygame.K_DOWN:
+                self.inventory_screen.move_slot_selection(columns=9, delta_x=0, delta_y=1)
+            elif key in (pygame.K_PAGEUP, pygame.K_LEFTBRACKET):
+                self.inventory_screen.move_recipe_selection(-1)
+            elif key in (pygame.K_PAGEDOWN, pygame.K_RIGHTBRACKET):
+                self.inventory_screen.move_recipe_selection(1)
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                result = self.inventory_screen.activate_slot(self.inventory)
+                self._apply_inventory_ui_result(result.changed, result.message)
+            elif key == pygame.K_q:
+                result = self.inventory_screen.quick_move_selected(self.inventory)
+                self._apply_inventory_ui_result(result.changed, result.message)
+            elif key == pygame.K_c:
+                self._craft_selected_recipe()
+            return
+
+        if key == pygame.K_ESCAPE:
+            if self.flow.screen is VoxelScreen.PAUSED:
+                self.flow.resume()
+                self._capture_mouse(True)
+            elif self.flow.screen is VoxelScreen.MAIN_MENU:
+                self.running = False
+            elif self.flow.screen is VoxelScreen.DEAD:
+                self.flow.return_to_main_menu()
+            return
+        if key in (pygame.K_UP, pygame.K_w):
+            self.flow.move_selection(-1)
+        elif key in (pygame.K_DOWN, pygame.K_s):
+            self.flow.move_selection(1)
+        elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+            self._activate_flow_action(self.flow.activate_selected())
+        elif self.flow.screen is VoxelScreen.DEAD and key == pygame.K_r:
+            self._activate_flow_action(GameFlowAction.RESPAWN)
+
+    def _process_overlay_click(self, event: Any) -> None:
+        hud_x, hud_y = self._hud_pointer(event.pos)
+        if self.flow.screen is VoxelScreen.INVENTORY:
+            slot = self._inventory_slot_at(hud_x, hud_y)
+            if slot is not None:
+                self.inventory_screen.select_slot(slot)
+                if event.button == 1:
+                    result = self.inventory_screen.activate_slot(self.inventory)
+                    self._apply_inventory_ui_result(result.changed, result.message)
+                elif event.button == 3:
+                    result = self.inventory_screen.quick_move_selected(self.inventory)
+                    self._apply_inventory_ui_result(result.changed, result.message)
+                return
+            recipe = self._recipe_at(hud_x, hud_y)
+            if recipe is not None:
+                self.inventory_screen.selected_recipe_index = recipe
+                if event.button == 1:
+                    self._craft_selected_recipe()
+            return
+        option = self._menu_option_at(hud_x, hud_y)
+        if option is not None:
+            self.flow.selected_index = option
+            self._activate_flow_action(self.flow.activate_selected())
+
+    def _activate_flow_action(self, action: GameFlowAction) -> None:
+        if action is GameFlowAction.NEW_WORLD:
+            self._reset_new_world()
+            self.flow.start_new_world()
+            self._capture_mouse(True)
+        elif action is GameFlowAction.CONTINUE:
+            if self._load_edits() and self.flow.continue_world():
+                self._capture_mouse(True)
+        elif action is GameFlowAction.RESUME:
+            if self.flow.resume():
+                self._capture_mouse(True)
+        elif action is GameFlowAction.SAVE:
+            self._save_edits()
+        elif action is GameFlowAction.SAVE_AND_QUIT:
+            if self._save_edits():
+                self.running = False
+        elif action is GameFlowAction.RESPAWN:
+            if self.flow.respawn():
+                self._respawn_after_death()
+                self._capture_mouse(True)
+        elif action is GameFlowAction.QUIT:
+            if self.flow.screen is VoxelScreen.DEAD:
+                self.flow.return_to_main_menu()
+            else:
+                self.running = False
+
+    def _open_pause_menu(self) -> None:
+        if self.flow.pause():
+            self._mining_held = False
+            self.mining.cancel("game paused")
+            self._capture_mouse(False)
+
+    def _open_inventory_screen(self) -> None:
+        if self.flow.open_inventory():
+            self.inventory_screen.reset()
+            self._mining_held = False
+            self.mining.cancel("inventory opened")
+            self._capture_mouse(False)
+
+    def _on_inventory_changed(self, cancellation_reason: str) -> None:
+        self.mining.cancel(cancellation_reason)
+        self.dirty = True
+        self._selection_changed_at = pygame.time.get_ticks() / 1000.0
+
+    def _apply_inventory_ui_result(self, changed: bool, message: str) -> None:
+        self.save_message = message
+        self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
+        if changed:
+            self._on_inventory_changed("inventory changed")
+
+    def _craft_selected_recipe(self) -> None:
+        attempt = self.inventory_screen.craft_selected(self.inventory)
+        if attempt.result is CraftingResult.CRAFTED:
+            assert attempt.recipe is not None
+            self._apply_inventory_ui_result(True, f"Crafted {attempt.recipe.output_label}")
+        else:
+            self._apply_inventory_ui_result(False, attempt.result.value.capitalize())
+
+    def _reset_new_world(self) -> None:
+        self.edits = BlockEditStore()
+        self.editable_world = EditableVoxelWorld(column_at=self._column_at, edits=self.edits)
+        self.interactions = VoxelInteractionController(
+            world=self.editable_world,
+            edits=self.edits,
+            break_cooldown=self.config.break_cooldown,
+            placement_cooldown=self.config.placement_cooldown,
+            maximum_reach=self.config.interaction_reach,
+        )
+        self.inventory = create_bootstrap_inventory(enabled=self.config.bootstrap_inventory)
+        self.dropped_items = DroppedItemManager()
+        self.vitals = PlayerVitals()
+        self.last_interaction = InteractionResult.NONE
+        self.last_pickup = "none"
+        self.last_placement_consumption = "none"
+        self.save_message = "New world started"
+        self.dirty = False
+        self.target = None
+        self._stream_signature = None
+        self._place_player_at_spawn()
+        self._refresh_interaction_previews()
+        self._stream()
+
+    def _place_player_at_spawn(self) -> None:
+        self.player = PlayerState(
+            x=float(self.spawn_x) + 0.5,
+            y=safe_spawn_height(
+                world_x=self.spawn_x,
+                world_z=self.spawn_z,
+                height_at=self._height_at,
+            ),
+            z=float(self.spawn_z) + 0.5,
+            grounded=True,
+        )
+
+    @staticmethod
+    def _inventory_slot_at(hud_x: int, hud_y: int) -> int | None:
+        start_x, start_y, size, gap = 76, 138, 48, 7
+        column = (hud_x - start_x) // (size + gap)
+        row = (hud_y - start_y) // (size + gap)
+        if not 0 <= column < 9 or not 0 <= row < 3:
+            return None
+        within_x = (hud_x - start_x) % (size + gap)
+        within_y = (hud_y - start_y) % (size + gap)
+        if within_x >= size or within_y >= size:
+            return None
+        return row * 9 + column
+
+    def _recipe_at(self, hud_x: int, hud_y: int) -> int | None:
+        if not 626 <= hud_x < 970 or hud_y < 116:
+            return None
+        offset = hud_y - 116
+        index, within = divmod(offset, 46)
+        if within >= 38 or not 0 <= index < len(self.inventory_screen.recipes):
+            return None
+        return index
+
+    def _menu_option_at(self, hud_x: int, hud_y: int) -> int | None:
+        options = self.flow.options
+        if not options or not 340 <= hud_x < 684 or hud_y < 220:
+            return None
+        offset = hud_y - 220
+        index, within = divmod(offset, 54)
+        if within >= 42 or not 0 <= index < len(options):
+            return None
+        return index
+
+    @staticmethod
+    def _hud_pointer(position: tuple[int, int]) -> tuple[int, int]:
+        width, height = pygame.display.get_window_size()
+        return (
+            round(position[0] * 1024 / max(1, width)),
+            round(position[1] * 512 / max(1, height)),
+        )
+
     def update(self, delta_seconds: float) -> None:
         """Apply first-person motion, physics, targeting, and streaming."""
+        if self.config.game_flow_enabled and not self.flow.gameplay_active:
+            self._mining_held = False
+            self.mining.cancel("gameplay overlay active")
+            self.target = None
+            self._refresh_interaction_previews()
+            return
         keys = pygame.key.get_pressed()
         gameplay_active = self.mouse_captured
         raw_forward = int(keys[pygame.K_w]) - int(keys[pygame.K_s]) if gameplay_active else 0
@@ -720,7 +1038,14 @@ class VoxelPrototypeApplication:
                 self.save_message = f"Fall damage: {damage}"
                 self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
             if self.vitals.snapshot.health_milli == 0:
-                self._respawn_after_death()
+                if self.config.game_flow_enabled:
+                    self.flow.mark_dead()
+                    self._mining_held = False
+                    self.mining.cancel("player died")
+                    self.target = None
+                    self._capture_mouse(False)
+                else:
+                    self._respawn_after_death()
         if self.dropped_items.update(delta_seconds, solid_at=self._solid_at):
             self.dirty = True
         pickups = self.dropped_items.pickup_near(
@@ -1223,6 +1548,7 @@ class VoxelPrototypeApplication:
             self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
             return False
         self.dirty = False
+        self.flow.set_continue_available(True)
         self.save_message = "World saved"
         self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
         return True
@@ -1309,6 +1635,7 @@ class VoxelPrototypeApplication:
         )
         self._refresh_interaction_previews()
         self.dirty = False
+        self.flow.set_continue_available(True)
         self.save_message = "World loaded"
         self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
         return True
@@ -1465,7 +1792,7 @@ class VoxelPrototypeApplication:
             selected_material=(
                 None
                 if self.inventory.selected_stack is None
-                else material_for_item(self.inventory.selected_stack.item)
+                else item_policy(self.inventory.selected_stack.item).placeable_material
             ),
             edit_revision=self.edits.revision,
             edited_block_count=len(self.edits),
@@ -1589,16 +1916,225 @@ class VoxelPrototypeApplication:
                 (8, 6 + index * 22),
             )
         self._draw_hotbar(surface)
-        self._draw_interaction_prompt(surface, hud.interaction_prompt)
-        if self.show_help:
-            self._draw_help_panel(surface)
-        if not hud.mouse_captured:
-            self._draw_capture_prompt(surface)
+        if self.config.game_flow_enabled and self.flow.overlay_active:
+            self._draw_flow_overlay(surface)
+        else:
+            self._draw_interaction_prompt(surface, hud.interaction_prompt)
+            if self.show_help:
+                self._draw_help_panel(surface)
+            if not hud.mouse_captured:
+                self._draw_capture_prompt(surface)
         self._hud_texture.write(pygame.image.tobytes(surface, "RGBA", True))
         self.context.disable(moderngl.DEPTH_TEST)
         self._hud_texture.use(location=1)
         self._hud_array.render(moderngl.TRIANGLES)
         self.context.enable(moderngl.DEPTH_TEST)
+
+    def _draw_flow_overlay(self, surface: pygame.Surface) -> None:
+        if self._font is None:
+            return
+        pygame.draw.rect(surface, (5, 9, 15, 225), surface.get_rect())
+        if self.flow.screen is VoxelScreen.INVENTORY:
+            self._draw_inventory_screen(surface)
+        else:
+            self._draw_menu_screen(surface)
+
+    def _draw_menu_screen(self, surface: pygame.Surface) -> None:
+        if self._font is None:
+            return
+        font = self._font
+        title_text = {
+            VoxelScreen.MAIN_MENU: "OPEN WORLD RPG",
+            VoxelScreen.PAUSED: "PAUSED",
+            VoxelScreen.DEAD: "YOU DIED",
+        }.get(self.flow.screen, "OPEN WORLD RPG")
+        subtitle_text = {
+            VoxelScreen.MAIN_MENU: "v0.9.0 playable-loop candidate",
+            VoxelScreen.PAUSED: "The world is paused",
+            VoxelScreen.DEAD: f"Deaths: {self.vitals.snapshot.death_count}",
+        }.get(self.flow.screen, "")
+        title = font.render(title_text, True, (255, 236, 160))
+        subtitle = font.render(subtitle_text, True, (185, 205, 218))
+        surface.blit(title, (512 - title.get_width() // 2, 116))
+        surface.blit(subtitle, (512 - subtitle.get_width() // 2, 154))
+        for index, option in enumerate(self.flow.options):
+            rect = pygame.Rect(340, 220 + index * 54, 344, 42)
+            selected = index == self.flow.selected_index
+            pygame.draw.rect(
+                surface,
+                (64, 80, 92, 235) if selected else (18, 27, 36, 225),
+                rect,
+                border_radius=6,
+            )
+            pygame.draw.rect(
+                surface,
+                (255, 226, 120) if selected else (91, 112, 126),
+                rect,
+                2,
+                border_radius=6,
+            )
+            colour = (245, 245, 235) if option.enabled else (112, 120, 126)
+            label = font.render(option.label, True, colour)
+            surface.blit(
+                label,
+                (rect.centerx - label.get_width() // 2, rect.centery - label.get_height() // 2),
+            )
+        hint = font.render("Arrow keys / mouse to select   Enter to confirm", True, (160, 180, 192))
+        surface.blit(hint, (512 - hint.get_width() // 2, 458))
+        if self.save_message:
+            feedback = font.render(self.save_message, True, (255, 205, 125))
+            surface.blit(feedback, (512 - feedback.get_width() // 2, 414))
+
+    def _draw_inventory_screen(self, surface: pygame.Surface) -> None:
+        if self._font is None:
+            return
+        font = self._font
+        title = font.render("INVENTORY & CRAFTING", True, (255, 236, 160))
+        surface.blit(title, (76, 70))
+        instructions = font.render(
+            "Arrows: move  Enter: select/move  Q: quick move  C: craft  E/Esc: close",
+            True,
+            (170, 195, 210),
+        )
+        surface.blit(instructions, (76, 98))
+        atlas = pygame.image.frombytes(generate_texture_atlas(), (ATLAS_SIZE, ATLAS_SIZE), "RGBA")
+        start_x, start_y, size, gap = 76, 138, 48, 7
+        for index, slot in enumerate(self.inventory.slots()):
+            row, column = divmod(index, 9)
+            rect = pygame.Rect(
+                start_x + column * (size + gap),
+                start_y + row * (size + gap),
+                size,
+                size,
+            )
+            selected = index == self.inventory_screen.selected_slot_index
+            source = index == self.inventory_screen.source_slot_index
+            fill_colour = (
+                (80, 67, 32, 240)
+                if source
+                else ((55, 70, 82, 235) if selected else (22, 30, 38, 225))
+            )
+            pygame.draw.rect(surface, fill_colour, rect)
+            pygame.draw.rect(
+                surface,
+                (255, 230, 132) if selected or source else (90, 107, 118),
+                rect,
+                2,
+            )
+            self._draw_inventory_value(surface, atlas, rect, slot)
+            number = font.render(str(index + 1), True, (150, 165, 175))
+            surface.blit(number, (rect.x + 3, rect.y + 2))
+        hotbar_label = font.render("HOTBAR", True, (135, 205, 245))
+        backpack_label = font.render("BACKPACK", True, (135, 205, 245))
+        surface.blit(hotbar_label, (76, 302))
+        surface.blit(backpack_label, (76, 324))
+
+        craft_panel = pygame.Rect(616, 70, 370, 360)
+        pygame.draw.rect(surface, (12, 20, 28, 235), craft_panel, border_radius=8)
+        pygame.draw.rect(surface, (88, 108, 122), craft_panel, 2, border_radius=8)
+        craft_title = font.render("RECIPES", True, (255, 236, 160))
+        surface.blit(craft_title, (634, 84))
+        for index, recipe in enumerate(self.inventory_screen.recipes):
+            y = 116 + index * 46
+            selected = index == self.inventory_screen.selected_recipe_index
+            can_craft = self.inventory_screen.crafting.can_craft(self.inventory, recipe)
+            rect = pygame.Rect(626, y, 344, 38)
+            pygame.draw.rect(
+                surface,
+                (58, 73, 83, 235) if selected else (20, 29, 36, 220),
+                rect,
+                border_radius=5,
+            )
+            pygame.draw.rect(
+                surface,
+                (255, 220, 112) if selected else (72, 90, 101),
+                rect,
+                2 if selected else 1,
+                border_radius=5,
+            )
+            colour = (235, 245, 235) if can_craft else (140, 145, 148)
+            label = font.render(recipe.output_label, True, colour)
+            surface.blit(label, (rect.x + 8, rect.y + 4))
+            ingredients = ", ".join(
+                f"{ingredient.item.display_name} x{ingredient.quantity}"
+                for ingredient in recipe.ingredients
+            )
+            detail = pygame.font.Font(None, 16).render(ingredients, True, (160, 180, 190))
+            surface.blit(detail, (rect.x + 8, rect.y + 22))
+        selected_recipe = self.inventory_screen.selected_recipe
+        craft_hint = font.render(
+            f"C / click: craft {selected_recipe.output_label}",
+            True,
+            (255, 226, 140),
+        )
+        surface.blit(craft_hint, (626, 402))
+        if self.save_message:
+            feedback = font.render(self.save_message, True, (255, 205, 125))
+            surface.blit(feedback, (76, 390))
+
+    def _draw_inventory_value(
+        self,
+        surface: pygame.Surface,
+        atlas: pygame.Surface,
+        rect: pygame.Rect,
+        slot: ItemStack | ToolInstance | None,
+    ) -> None:
+        if self._font is None or slot is None:
+            return
+        font = self._font
+        if isinstance(slot, ItemStack):
+            material = item_policy(slot.item).placeable_material
+            if material is not None:
+                icon_for = {
+                    BlockMaterial.GRASS: FaceTexture.GRASS_TOP,
+                    BlockMaterial.DIRT: FaceTexture.DIRT,
+                    BlockMaterial.STONE: FaceTexture.STONE,
+                    BlockMaterial.SAND: FaceTexture.SAND,
+                    BlockMaterial.SNOW: FaceTexture.SNOW_TOP,
+                }
+                texture = icon_for[material]
+                atlas_index = tuple(FaceTexture).index(texture)
+                source = pygame.Rect(
+                    atlas_index % ATLAS_COLUMNS * ATLAS_TILE_SIZE,
+                    atlas_index // ATLAS_COLUMNS * ATLAS_TILE_SIZE,
+                    ATLAS_TILE_SIZE,
+                    ATLAS_TILE_SIZE,
+                )
+                icon = pygame.transform.scale(atlas.subsurface(source), (32, 32))
+                surface.blit(icon, (rect.x + 8, rect.y + 8))
+            else:
+                resource_colour = {
+                    ItemType.WOOD_LOG: (126, 82, 46),
+                    ItemType.WOOD_PLANK: (186, 136, 76),
+                    ItemType.STICK: (205, 166, 105),
+                }.get(slot.item, (150, 150, 150))
+                pygame.draw.rect(surface, resource_colour, rect.inflate(-20, -20), border_radius=4)
+            quantity = font.render(str(slot.quantity), True, (255, 255, 255))
+            surface.blit(
+                quantity,
+                (rect.right - quantity.get_width() - 3, rect.bottom - quantity.get_height()),
+            )
+            return
+        item = slot
+        colour = (166, 119, 69) if "wooden" in item.item.value else (155, 160, 166)
+        pygame.draw.line(
+            surface,
+            colour,
+            (rect.x + 13, rect.bottom - 10),
+            (rect.right - 12, rect.y + 10),
+            5,
+        )
+        durability = font.render(
+            f"{item.current_durability}/{item.maximum_durability}",
+            True,
+            (255, 110, 90)
+            if item.current_durability * 4 <= item.maximum_durability
+            else (255, 255, 255),
+        )
+        surface.blit(
+            durability,
+            (rect.right - durability.get_width() - 3, rect.bottom - durability.get_height()),
+        )
 
     def _draw_help_panel(self, surface: pygame.Surface) -> None:
         if self._font is None:
@@ -1682,17 +2218,25 @@ class VoxelPrototypeApplication:
             )
             if slot is not None:
                 if isinstance(slot, ItemStack):
-                    material = material_for_item(slot.item)
-                    texture = icon_for[material]
-                    atlas_index = tuple(FaceTexture).index(texture)
-                    source = pygame.Rect(
-                        atlas_index % ATLAS_COLUMNS * ATLAS_TILE_SIZE,
-                        atlas_index // ATLAS_COLUMNS * ATLAS_TILE_SIZE,
-                        ATLAS_TILE_SIZE,
-                        ATLAS_TILE_SIZE,
-                    )
-                    icon = pygame.transform.scale(atlas.subsurface(source), (34, 34))
-                    surface.blit(icon, (rect.x + 6, rect.y + 6))
+                    material = item_policy(slot.item).placeable_material
+                    if material is not None:
+                        texture = icon_for[material]
+                        atlas_index = tuple(FaceTexture).index(texture)
+                        source = pygame.Rect(
+                            atlas_index % ATLAS_COLUMNS * ATLAS_TILE_SIZE,
+                            atlas_index // ATLAS_COLUMNS * ATLAS_TILE_SIZE,
+                            ATLAS_TILE_SIZE,
+                            ATLAS_TILE_SIZE,
+                        )
+                        icon = pygame.transform.scale(atlas.subsurface(source), (34, 34))
+                        surface.blit(icon, (rect.x + 6, rect.y + 6))
+                    else:
+                        resource_colour = {
+                            ItemType.WOOD_LOG: (126, 82, 46),
+                            ItemType.WOOD_PLANK: (186, 136, 76),
+                            ItemType.STICK: (205, 166, 105),
+                        }.get(slot.item, (150, 150, 150))
+                        pygame.draw.rect(surface, resource_colour, rect.inflate(-18, -18))
                     quantity = font.render(str(slot.quantity), True, (255, 255, 255))
                     surface.blit(
                         quantity,

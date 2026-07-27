@@ -35,7 +35,8 @@ DEFAULT_CONTROL_HINTS: tuple[ControlHint, ...] = (
     ControlHint(binding="Hold LMB", action="Mine target"),
     ControlHint(binding="RMB", action="Place selected block"),
     ControlHint(binding="1-9 / Wheel", action="Select hotbar slot"),
-    ControlHint(binding="Esc", action="Release mouse / quit"),
+    ControlHint(binding="E / Tab", action="Inventory & crafting"),
+    ControlHint(binding="Esc", action="Pause menu"),
     ControlHint(binding="F1 / H", action="Toggle controls"),
     ControlHint(binding="F3", action="Toggle diagnostics"),
 )

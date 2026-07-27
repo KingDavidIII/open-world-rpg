@@ -42,6 +42,30 @@ class InventoryAddResult:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class InventoryTransferResult:
+    """Observable outcome of a slot transfer or quick move."""
+
+    changed: bool
+    moved_quantity: int = 0
+    swapped: bool = False
+    message: str = "No change"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.changed, bool):
+            raise TypeError("changed must be a boolean.")
+        if isinstance(self.moved_quantity, bool) or not isinstance(self.moved_quantity, int):
+            raise TypeError("moved_quantity must be an integer.")
+        if self.moved_quantity < 0:
+            raise ValueError("moved_quantity must be non-negative.")
+        if not isinstance(self.swapped, bool):
+            raise TypeError("swapped must be a boolean.")
+        if not isinstance(self.message, str):
+            raise TypeError("message must be a string.")
+        if not self.message.strip():
+            raise ValueError("message must not be empty.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PlayerInventorySnapshot:
     revision: int
     selected_hotbar_index: int
@@ -177,6 +201,135 @@ class PlayerInventory:
         self._slots = replacement
         self._revision += 1
         return True
+
+    def move_slot(
+        self,
+        source_index: int,
+        destination_index: int,
+        *,
+        quantity: int | None = None,
+    ) -> InventoryTransferResult:
+        """Move, merge, split, or swap one inventory slot atomically."""
+        source_index = _slot_index(source_index)
+        destination_index = _slot_index(destination_index)
+        if quantity is not None:
+            quantity = _quantity(quantity)
+        if source_index == destination_index:
+            return InventoryTransferResult(changed=False, message="Selection cleared")
+        source = self._slots[source_index]
+        destination = self._slots[destination_index]
+        if source is None:
+            return InventoryTransferResult(changed=False, message="Source slot is empty")
+        if isinstance(source, ToolInstance):
+            if quantity not in (None, 1):
+                return InventoryTransferResult(changed=False, message="Tools cannot be split")
+            if destination is None:
+                replacement = list(self._slots)
+                replacement[destination_index] = source
+                replacement[source_index] = None
+                self._slots = replacement
+                self._revision += 1
+                return InventoryTransferResult(changed=True, moved_quantity=1, message="Tool moved")
+            replacement = list(self._slots)
+            replacement[source_index], replacement[destination_index] = destination, source
+            self._slots = replacement
+            self._revision += 1
+            return InventoryTransferResult(
+                changed=True, moved_quantity=1, swapped=True, message="Slots swapped"
+            )
+
+        requested = source.quantity if quantity is None else min(quantity, source.quantity)
+        replacement = list(self._slots)
+        if destination is None:
+            replacement[destination_index] = ItemStack(item=source.item, quantity=requested)
+            remaining = source.quantity - requested
+            replacement[source_index] = None if remaining == 0 else source.with_quantity(remaining)
+            self._slots = replacement
+            self._revision += 1
+            return InventoryTransferResult(
+                changed=True, moved_quantity=requested, message="Stack moved"
+            )
+        if isinstance(destination, ItemStack) and destination.item is source.item:
+            capacity = destination.maximum - destination.quantity
+            moved = min(requested, capacity)
+            if moved == 0:
+                return InventoryTransferResult(changed=False, message="Destination stack is full")
+            replacement[destination_index] = destination.with_quantity(destination.quantity + moved)
+            remaining = source.quantity - moved
+            replacement[source_index] = None if remaining == 0 else source.with_quantity(remaining)
+            self._slots = replacement
+            self._revision += 1
+            return InventoryTransferResult(
+                changed=True, moved_quantity=moved, message="Stacks merged"
+            )
+        if quantity is not None and quantity < source.quantity:
+            return InventoryTransferResult(
+                changed=False, message="Partial stacks cannot replace occupied slots"
+            )
+        replacement[source_index], replacement[destination_index] = destination, source
+        self._slots = replacement
+        self._revision += 1
+        return InventoryTransferResult(
+            changed=True,
+            moved_quantity=source.quantity,
+            swapped=True,
+            message="Slots swapped",
+        )
+
+    def quick_move(self, index: int) -> InventoryTransferResult:
+        """Move a slot between hotbar and backpack using deterministic first fit."""
+        index = _slot_index(index)
+        source = self._slots[index]
+        if source is None:
+            return InventoryTransferResult(changed=False, message="Source slot is empty")
+        destinations = tuple(
+            range(HOTBAR_SIZE, INVENTORY_CAPACITY) if index < HOTBAR_SIZE else range(0, HOTBAR_SIZE)
+        )
+        replacement = list(self._slots)
+        moved_total = 0
+        if isinstance(source, ItemStack):
+            remaining = source.quantity
+            for destination_index in destinations:
+                destination = replacement[destination_index]
+                if (
+                    isinstance(destination, ItemStack)
+                    and destination.item is source.item
+                    and destination.quantity < destination.maximum
+                ):
+                    moved = min(remaining, destination.maximum - destination.quantity)
+                    replacement[destination_index] = destination.with_quantity(
+                        destination.quantity + moved
+                    )
+                    remaining -= moved
+                    moved_total += moved
+                    if remaining == 0:
+                        break
+            if remaining:
+                for destination_index in destinations:
+                    if replacement[destination_index] is None:
+                        replacement[destination_index] = ItemStack(
+                            item=source.item, quantity=remaining
+                        )
+                        moved_total += remaining
+                        remaining = 0
+                        break
+            replacement[index] = None if remaining == 0 else source.with_quantity(remaining)
+        else:
+            for destination_index in destinations:
+                if replacement[destination_index] is None:
+                    replacement[destination_index] = source
+                    replacement[index] = None
+                    moved_total = 1
+                    break
+        if moved_total == 0:
+            return InventoryTransferResult(changed=False, message="Destination section is full")
+        self._slots = replacement
+        self._revision += 1
+        return InventoryTransferResult(
+            changed=True,
+            moved_quantity=moved_total,
+            message="Quick moved",
+        )
 
     def use_tool(self, index: int) -> bool:
         index = _slot_index(index)

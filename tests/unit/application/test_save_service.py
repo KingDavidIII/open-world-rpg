@@ -100,8 +100,12 @@ def test_gameplay_resources_round_trip_and_legacy_policy(tmp_path: Path) -> None
     service = create_service(tmp_path)
     inventory = create_bootstrap_inventory()
     inventory.select_hotbar(2)
+    inventory.add(ItemType.WOOD_LOG, 3)
+    inventory.add(ItemType.WOOD_PLANK, 7)
+    inventory.add(ItemType.STICK, 5)
     drops = DroppedItemManager()
     drops.spawn(item=ItemType.GRASS_BLOCK, quantity=1, position=(-1.5, 2.5, 3.5))
+    drops.spawn(item=ItemType.WOOD_LOG, quantity=2, position=(1.0, 2.0, 3.0))
     service.save(
         slot=SaveSlot("resources"),
         inventory=inventory.snapshot(),

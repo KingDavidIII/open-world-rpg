@@ -14,7 +14,8 @@ def test_control_hints_are_compact_stable_and_cover_core_play() -> None:
     assert bindings["W A S D"] == "Move"
     assert bindings["Hold LMB"] == "Mine target"
     assert bindings["RMB"] == "Place selected block"
-    assert bindings["Esc"] == "Release mouse / quit"
+    assert bindings["E / Tab"] == "Inventory & crafting"
+    assert bindings["Esc"] == "Pause menu"
 
 
 def test_movement_axes_preserve_cardinal_input_and_normalise_diagonals() -> None:

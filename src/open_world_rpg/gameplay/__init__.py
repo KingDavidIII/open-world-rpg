@@ -1,5 +1,14 @@
 """Stable gameplay-domain contracts."""
 
+from .crafting import (
+    DEFAULT_RECIPES,
+    CraftingAttempt,
+    CraftingCatalogue,
+    CraftingRecipe,
+    CraftingResult,
+    CraftingService,
+    RecipeIngredient,
+)
 from .drops import (
     MAX_ACTIVE_DROPS,
     DroppedItem,
@@ -12,6 +21,7 @@ from .inventory import (
     INVENTORY_CAPACITY,
     InventoryAddResult,
     InventorySlot,
+    InventoryTransferResult,
     PlayerInventory,
     PlayerInventorySnapshot,
     create_bootstrap_inventory,
@@ -52,6 +62,7 @@ from .vitals import (
 )
 
 __all__ = [
+    "DEFAULT_RECIPES",
     "FALL_DAMAGE_PER_BLOCK",
     "HOTBAR_SIZE",
     "INVENTORY_CAPACITY",
@@ -66,11 +77,17 @@ __all__ = [
     "STAMINA_REGEN_DELAY_MICROSECONDS",
     "STAMINA_REGEN_PER_SECOND",
     "VITAL_SCALE",
+    "CraftingAttempt",
+    "CraftingCatalogue",
+    "CraftingRecipe",
+    "CraftingResult",
+    "CraftingService",
     "DroppedItem",
     "DroppedItemManager",
     "DroppedItemSnapshot",
     "InventoryAddResult",
     "InventorySlot",
+    "InventoryTransferResult",
     "ItemPolicy",
     "ItemStack",
     "ItemType",
@@ -81,6 +98,7 @@ __all__ = [
     "PlayerInventorySnapshot",
     "PlayerVitals",
     "PlayerVitalsSnapshot",
+    "RecipeIngredient",
     "TimedMiningController",
     "ToolClassification",
     "ToolInstance",

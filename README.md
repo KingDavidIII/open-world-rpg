@@ -89,13 +89,33 @@ Or use the installed voxel command:
 - `Hold left mouse`: mine
 - `Right mouse`: place the selected block
 - `1-9` or mouse wheel: select a hotbar slot
-- `Escape`: release the mouse; press again to exit
+- `E` or `Tab`: open inventory and crafting
+- `Arrow keys`: navigate menus and inventory slots
+- `Enter`: activate a menu option or move a selected slot
+- `Q`: quick-move the selected inventory slot
+- `[` / `]` or `Page Up` / `Page Down`: select a recipe
+- `C`: craft the selected recipe
+- `Escape`: pause, close inventory, or resume
 - `F1` or `H`: toggle the in-game control guide
 - `F3`: toggle diagnostics
 
 The current development candidate includes the v0.9.0 Sprint 1 core-playability
-work. The released package version remains v0.8.0 until the complete v0.9.0
-release cycle is prepared.
+work and Sprint 2 inventory, crafting, and game-flow systems. Interactive voxel
+launches now open a main menu, while `--direct-play` keeps the developer path
+available. The released package version remains v0.8.0 until the complete
+v0.9.0 release cycle is prepared.
+
+
+### v0.9.0 Sprint 2 candidate
+
+- Main, pause, inventory/crafting, and death screens
+- New World, Continue, Save, Save & Quit, and Respawn flows
+- Full 27-slot inventory interaction
+- Atomic slot move, merge, swap, split, and quick-move policies
+- Logs, planks, and sticks as persistence-safe crafting resources
+- Wooden and stone pickaxe and shovel recipes
+- Atomic crafting with inventory-capacity protection
+- Tool durability display in the inventory screen
 
 ## Quality checks
 

@@ -14,6 +14,8 @@ import pytest
 import open_world_rpg.ui.voxel.application as voxel_application
 import open_world_rpg.ui.voxel_demo as voxel_demo
 from open_world_rpg.gameplay import (
+    CraftingResult,
+    ItemStack,
     ItemType,
     MiningStatus,
     PickupResult,
@@ -33,6 +35,7 @@ from open_world_rpg.ui.voxel.application import (
 from open_world_rpg.ui.voxel.blocks import BlockColumn
 from open_world_rpg.ui.voxel.camera import PlayerState
 from open_world_rpg.ui.voxel.collision import RayHit
+from open_world_rpg.ui.voxel.game_flow import GameFlowAction, VoxelScreen
 from open_world_rpg.ui.voxel.interaction import InteractionOutcome, InteractionResult
 from open_world_rpg.world import (
     BlockMaterial,
@@ -94,6 +97,8 @@ def test_run_validates_bounded_frame_count() -> None:
         VoxelPrototypeConfig(autosave=1)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         VoxelPrototypeConfig(bootstrap_inventory=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        VoxelPrototypeConfig(game_flow_enabled=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         VoxelPrototypeConfig(load_on_start=True)
     with pytest.raises(ValueError):
@@ -910,10 +915,16 @@ def test_voxel_entry_point_selects_smoke_and_interactive_modes(
     monkeypatch.setattr(voxel_demo, "VoxelPrototypeApplication", Application)
     assert voxel_demo.main(["--smoke-test"]) == 0
     assert calls[-1][0].hidden_window
+    assert not calls[-1][0].game_flow_enabled
+    assert calls[-1][0].save_path is None
     assert calls[-1][1] == 3
     assert voxel_demo.main([]) == 0
     assert not calls[-1][0].hidden_window
+    assert calls[-1][0].game_flow_enabled
+    assert calls[-1][0].save_path == Path("saves/voxel.json")
     assert calls[-1][1] is None
+    assert voxel_demo.main(["--direct-play"]) == 0
+    assert not calls[-1][0].game_flow_enabled
     save_path = tmp_path / "voxel.json"
     assert (
         voxel_demo.main(
@@ -930,8 +941,13 @@ def test_voxel_entry_point_selects_smoke_and_interactive_modes(
     assert calls[-1][0].save_path == save_path
     assert calls[-1][0].load_on_start
     assert calls[-1][0].autosave
+    assert voxel_demo.main(["--load"]) == 0
+    assert calls[-1][0].load_on_start
+    assert calls[-1][0].save_path == Path("saves/voxel.json")
     with pytest.raises(SystemExit):
-        voxel_demo.main(["--load"])
+        voxel_demo.main(["--smoke-test", "--load"])
+    with pytest.raises(SystemExit):
+        voxel_demo.main(["--smoke-test", "--autosave"])
 
 
 def test_voxel_entry_point_reports_runtime_failure(
@@ -1233,3 +1249,596 @@ def test_render_colours_valid_invalid_and_feedback_previews(
     application.placement_preview = InteractionOutcome(result=InteractionResult.NO_TARGET)
     application.render()
     assert colours == []
+
+
+def test_game_flow_initial_state_layout_helpers_and_overlay_update(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    save_path = tmp_path / "world.json"
+    save_path.write_text("{}", encoding="utf-8")
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(game_flow_enabled=True, save_path=save_path)
+    )
+    assert application.flow.screen is VoxelScreen.MAIN_MENU
+    assert application.flow.continue_available
+    assert not application.mouse_captured
+
+    direct = VoxelPrototypeApplication()
+    assert direct.flow.screen is VoxelScreen.PLAYING
+    assert not direct.flow.continue_available
+
+    assert application._inventory_slot_at(76, 138) == 0  # type: ignore[attr-defined]
+    assert application._inventory_slot_at(516, 248) == 26  # type: ignore[attr-defined]
+    assert application._inventory_slot_at(124, 138) is None  # type: ignore[attr-defined]
+    assert application._inventory_slot_at(75, 138) is None  # type: ignore[attr-defined]
+    assert application._recipe_at(626, 116) == 0  # type: ignore[attr-defined]
+    assert application._recipe_at(969, 153) == 0  # type: ignore[attr-defined]
+    assert application._recipe_at(626, 154) is None  # type: ignore[attr-defined]
+    assert application._recipe_at(625, 116) is None  # type: ignore[attr-defined]
+    assert application._recipe_at(626, 1000) is None  # type: ignore[attr-defined]
+    assert application._menu_option_at(340, 220) == 0  # type: ignore[attr-defined]
+    assert application._menu_option_at(683, 261) == 0  # type: ignore[attr-defined]
+    assert application._menu_option_at(340, 262) is None  # type: ignore[attr-defined]
+    assert application._menu_option_at(100, 220) is None  # type: ignore[attr-defined]
+    application.flow.screen = VoxelScreen.INVENTORY
+    assert application._menu_option_at(340, 220) is None  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(pygame.display, "get_window_size", lambda: (2048, 1024))
+    assert application._hud_pointer((1024, 512)) == (512, 256)  # type: ignore[attr-defined]
+    monkeypatch.setattr(pygame.display, "get_window_size", lambda: (0, 0))
+    assert application._hud_pointer((1, 1)) == (1024, 512)  # type: ignore[attr-defined]
+
+    application.target = RayHit(x=0, y=0, z=0, distance=1.0)
+    application._mining_held = True  # type: ignore[attr-defined]
+    refreshed: list[bool] = []
+    monkeypatch.setattr(
+        application,
+        "_refresh_interaction_previews",
+        lambda: refreshed.append(True),
+    )
+    application.update(0.01)
+    assert application.target is None
+    assert not application._mining_held  # type: ignore[attr-defined]
+    assert refreshed == [True]
+
+
+def test_game_flow_actions_new_continue_pause_save_death_and_quit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(config=VoxelPrototypeConfig(game_flow_enabled=True))
+    captures: list[bool] = []
+    resets: list[str] = []
+    respawns: list[str] = []
+    save_results: list[bool] = []
+    load_results: list[bool] = []
+
+    def capture_mouse(captured: bool) -> None:
+        captures.append(captured)
+        application.mouse_captured = captured
+
+    monkeypatch.setattr(application, "_capture_mouse", capture_mouse)
+    monkeypatch.setattr(application, "_reset_new_world", lambda: resets.append("new"))
+    monkeypatch.setattr(application, "_respawn_after_death", lambda: respawns.append("respawn"))
+    monkeypatch.setattr(application, "_save_edits", lambda: save_results.pop(0))
+    monkeypatch.setattr(application, "_load_edits", lambda: load_results.pop(0))
+
+    application._activate_flow_action(GameFlowAction.NEW_WORLD)  # type: ignore[attr-defined]
+    assert resets == ["new"]
+    assert application.flow.screen is VoxelScreen.PLAYING
+    assert captures[-1]
+
+    application.flow.return_to_main_menu()
+    application.flow.set_continue_available(True)
+    load_results.extend((False, True))
+    application._activate_flow_action(GameFlowAction.CONTINUE)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.MAIN_MENU
+    application._activate_flow_action(GameFlowAction.CONTINUE)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.PLAYING
+
+    application.flow.pause()
+    application._activate_flow_action(GameFlowAction.RESUME)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.PLAYING
+
+    save_results.extend((True, False, True))
+    application._activate_flow_action(GameFlowAction.SAVE)  # type: ignore[attr-defined]
+    application.running = True
+    application._activate_flow_action(GameFlowAction.SAVE_AND_QUIT)  # type: ignore[attr-defined]
+    assert application.running
+    application._activate_flow_action(GameFlowAction.SAVE_AND_QUIT)  # type: ignore[attr-defined]
+    assert not application.running
+
+    application.flow.mark_dead()
+    application._activate_flow_action(GameFlowAction.RESPAWN)  # type: ignore[attr-defined]
+    assert respawns == ["respawn"]
+    assert application.flow.screen is VoxelScreen.PLAYING
+
+    application.flow.mark_dead()
+    application._activate_flow_action(GameFlowAction.QUIT)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.MAIN_MENU
+    application.flow.start_new_world()
+    application.running = True
+    application._activate_flow_action(GameFlowAction.QUIT)  # type: ignore[attr-defined]
+    assert not application.running
+    application._activate_flow_action(GameFlowAction.NONE)  # type: ignore[attr-defined]
+
+
+def test_game_flow_overlay_keyboard_mouse_and_inventory_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(config=VoxelPrototypeConfig(game_flow_enabled=True))
+    captured: list[bool] = []
+
+    def capture_mouse(value: bool) -> None:
+        captured.append(value)
+        application.mouse_captured = value
+
+    monkeypatch.setattr(application, "_capture_mouse", capture_mouse)
+    monkeypatch.setattr(pygame.time, "get_ticks", lambda: 2000)
+
+    application.flow.start_new_world()
+    application._open_inventory_screen()  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.INVENTORY
+    assert captured[-1] is False
+    for key in (pygame.K_RIGHT, pygame.K_DOWN, pygame.K_LEFT, pygame.K_UP):
+        application._process_overlay_key(key)  # type: ignore[attr-defined]
+    for key in (pygame.K_PAGEDOWN, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_LEFTBRACKET):
+        application._process_overlay_key(key)  # type: ignore[attr-defined]
+
+    application.inventory_screen.select_slot(2)
+    application._process_overlay_key(pygame.K_RETURN)  # type: ignore[attr-defined]
+    application.inventory_screen.select_slot(9)
+    application._process_overlay_key(pygame.K_KP_ENTER)  # type: ignore[attr-defined]
+    assert application.inventory.slot(9) is not None
+    application._process_overlay_key(pygame.K_q)  # type: ignore[attr-defined]
+
+    application.inventory.add(ItemType.WOOD_LOG, 1)
+    application.inventory_screen.selected_recipe_index = 0
+    application._process_overlay_key(pygame.K_c)  # type: ignore[attr-defined]
+    assert application.inventory.total_quantity(ItemType.WOOD_PLANK) == 4
+    assert application.save_message == "Crafted Wood Plank x4"
+    assert application.dirty
+
+    application.inventory_screen.selected_recipe_index = 5
+    application._process_overlay_key(pygame.K_c)  # type: ignore[attr-defined]
+    assert application.save_message == CraftingResult.MISSING_INGREDIENTS.value.capitalize()
+
+    application._process_overlay_key(pygame.K_e)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.PLAYING
+    assert captured[-1] is True
+
+    application._open_pause_menu()  # type: ignore[attr-defined]
+    application._process_overlay_key(pygame.K_ESCAPE)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.PLAYING
+    application.flow.return_to_main_menu()
+    application.running = True
+    application._process_overlay_key(pygame.K_ESCAPE)  # type: ignore[attr-defined]
+    assert not application.running
+    application.flow.mark_dead()
+    application._process_overlay_key(pygame.K_ESCAPE)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.MAIN_MENU
+
+    actions: list[GameFlowAction] = []
+    monkeypatch.setattr(application, "_activate_flow_action", actions.append)
+    application._process_overlay_key(pygame.K_DOWN)  # type: ignore[attr-defined]
+    application._process_overlay_key(pygame.K_UP)  # type: ignore[attr-defined]
+    application._process_overlay_key(pygame.K_SPACE)  # type: ignore[attr-defined]
+    assert actions[-1] is GameFlowAction.NEW_WORLD
+    application.flow.mark_dead()
+    application._process_overlay_key(pygame.K_r)  # type: ignore[attr-defined]
+    assert actions[-1] is GameFlowAction.RESPAWN
+
+    monkeypatch.setattr(application, "_hud_pointer", lambda position: position)
+    application.flow.screen = VoxelScreen.INVENTORY
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(76, 138))
+    )
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=(76, 138))
+    )
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(626, 116))
+    )
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(0, 0))
+    )
+    application.flow.return_to_main_menu()
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(340, 220))
+    )
+    assert actions[-1] is GameFlowAction.NEW_WORLD
+
+
+def test_game_flow_event_router_and_gameplay_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(config=VoxelPrototypeConfig(game_flow_enabled=True))
+    application.running = True
+    application._process_flow_event(pygame.event.Event(pygame.QUIT))  # type: ignore[attr-defined]
+    assert not application.running
+
+    routed: list[int] = []
+    application.flow.start_new_world()
+    monkeypatch.setattr(
+        application,
+        "_process_flow_gameplay_event",
+        lambda event: routed.append(event.type),
+    )
+    application._process_flow_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_a))  # type: ignore[attr-defined]
+    assert routed == [pygame.KEYDOWN]
+
+    application = VoxelPrototypeApplication(config=VoxelPrototypeConfig(game_flow_enabled=True))
+    captures: list[bool] = []
+    pauses: list[bool] = []
+    inventories: list[bool] = []
+    streams: list[bool] = []
+    saves: list[bool] = []
+    loads: list[bool] = []
+    inventory_changes: list[str] = []
+    interactions: list[InteractionOutcome] = []
+
+    def capture_mouse(value: bool) -> None:
+        captures.append(value)
+        application.mouse_captured = value
+
+    monkeypatch.setattr(application, "_capture_mouse", capture_mouse)
+    monkeypatch.setattr(application, "_open_pause_menu", lambda: pauses.append(True))
+    monkeypatch.setattr(application, "_open_inventory_screen", lambda: inventories.append(True))
+    monkeypatch.setattr(application, "_place_player_at_spawn", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda: streams.append(True))
+    monkeypatch.setattr(application, "_save_edits", lambda: saves.append(True) or True)
+    monkeypatch.setattr(application, "_load_edits", lambda: loads.append(True) or True)
+    monkeypatch.setattr(application, "_on_inventory_changed", inventory_changes.append)
+    monkeypatch.setattr(application, "_refresh_interaction_previews", lambda: None)
+    monkeypatch.setattr(application, "_apply_interaction", interactions.append)
+    monkeypatch.setattr(pygame.time, "get_ticks", lambda: 1000)
+    application.flow.start_new_world()
+
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.WINDOWFOCUSLOST)
+    )
+    for key in (
+        pygame.K_ESCAPE,
+        pygame.K_e,
+        pygame.K_F1,
+        pygame.K_h,
+        pygame.K_F3,
+        pygame.K_f,
+        pygame.K_r,
+        pygame.K_F5,
+        pygame.K_F6,
+        pygame.K_F7,
+        pygame.K_F8,
+        pygame.K_1,
+        pygame.K_2,
+    ):
+        application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+            pygame.event.Event(pygame.KEYDOWN, key=key)
+        )
+    assert len(pauses) == 2
+    assert inventories == [True]
+    assert streams == [True, True]
+    assert saves == [True]
+    assert loads == [True]
+    assert inventory_changes == ["selected tool changed"]
+
+    application.mouse_captured = True
+    old_camera = application.camera
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEMOTION, rel=(2, -1))
+    )
+    assert application.camera != old_camera
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEWHEEL, y=1)
+    )
+    assert inventory_changes[-1] == "selected tool changed"
+
+    application.mouse_captured = False
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1)
+    )
+    assert captures[-1] is True
+    application.mouse_captured = True
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=4)
+    )
+    application.break_preview = InteractionOutcome(result=InteractionResult.WATER)
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1)
+    )
+    assert interactions[-1].result is InteractionResult.WATER
+    application.break_preview = InteractionOutcome(
+        result=InteractionResult.BROKEN,
+        coordinate=WorldBlockCoordinate(x=0, y=0, z=0),
+    )
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1)
+    )
+    assert application._mining_held  # type: ignore[attr-defined]
+    placement = InteractionOutcome(result=InteractionResult.PLACED)
+    monkeypatch.setattr(
+        application.interactions,
+        "place_inventory_block",
+        lambda **_kwargs: placement,
+    )
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3)
+    )
+    assert interactions[-1] is placement
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONUP, button=1)
+    )
+    assert not application._mining_held  # type: ignore[attr-defined]
+
+
+def test_new_world_spawn_and_flow_overlay_rendering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pygame.init()
+    pygame.font.init()
+    try:
+        application = VoxelPrototypeApplication(config=VoxelPrototypeConfig(game_flow_enabled=True))
+        application._font = pygame.font.Font(None, 22)  # type: ignore[attr-defined]
+        surface = pygame.Surface((1024, 512), pygame.SRCALPHA)
+        application.save_message = "Status"
+        application._draw_flow_overlay(surface)  # type: ignore[attr-defined]
+        application.flow.screen = VoxelScreen.PAUSED
+        application._draw_flow_overlay(surface)  # type: ignore[attr-defined]
+        application.flow.screen = VoxelScreen.DEAD
+        application._draw_flow_overlay(surface)  # type: ignore[attr-defined]
+
+        application.inventory.set_slot(0, ItemStack(item=ItemType.WOOD_LOG, quantity=2))
+        application.inventory.set_slot(1, ItemStack(item=ItemType.WOOD_PLANK, quantity=2))
+        application.inventory.set_slot(2, ItemStack(item=ItemType.STICK, quantity=2))
+        application.inventory.set_slot(3, ItemStack(item=ItemType.GRASS_BLOCK, quantity=2))
+        application.inventory.set_slot(
+            4,
+            ToolInstance(
+                item=ItemType.WOODEN_PICKAXE,
+                current_durability=1,
+                maximum_durability=64,
+            ),
+        )
+        application.inventory.set_slot(5, ToolInstance.create(ItemType.STONE_PICKAXE))
+        application.flow.screen = VoxelScreen.INVENTORY
+        application.inventory_screen.source_slot_index = 0
+        application._draw_flow_overlay(surface)  # type: ignore[attr-defined]
+        application.save_message = ""
+        application._draw_flow_overlay(surface)  # type: ignore[attr-defined]
+        application._draw_hotbar(surface)  # type: ignore[attr-defined]
+        application._draw_inventory_value(  # type: ignore[attr-defined]
+            surface,
+            surface,
+            pygame.Rect(0, 0, 48, 48),
+            None,
+        )
+        saved_font = application._font  # type: ignore[attr-defined]
+        application._font = None  # type: ignore[attr-defined]
+        application._draw_flow_overlay(surface)  # type: ignore[attr-defined]
+        application._draw_menu_screen(surface)  # type: ignore[attr-defined]
+        application._draw_inventory_screen(surface)  # type: ignore[attr-defined]
+        application._draw_inventory_value(  # type: ignore[attr-defined]
+            surface,
+            surface,
+            pygame.Rect(0, 0, 48, 48),
+            application.inventory.slot(0),
+        )
+        application._font = saved_font  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(voxel_application, "safe_spawn_height", lambda **_kwargs: 12.5)
+        application.spawn_x = 4
+        application.spawn_z = 6
+        application._place_player_at_spawn()  # type: ignore[attr-defined]
+        assert application.player == PlayerState(x=4.5, y=12.5, z=6.5, grounded=True)
+
+        calls: list[str] = []
+        monkeypatch.setattr(application, "_place_player_at_spawn", lambda: calls.append("spawn"))
+        monkeypatch.setattr(
+            application,
+            "_refresh_interaction_previews",
+            lambda: calls.append("preview"),
+        )
+        monkeypatch.setattr(application, "_stream", lambda: calls.append("stream"))
+        application.edits.set_block(
+            WorldBlockCoordinate(x=0, y=1, z=0),
+            BlockMaterial.STONE,
+        )
+        application._reset_new_world()  # type: ignore[attr-defined]
+        assert calls == ["spawn", "preview", "stream"]
+        assert application.edits.revision == 0
+        assert application.save_message == "New world started"
+        assert not application.dirty
+    finally:
+        pygame.quit()
+
+
+def test_game_flow_overlay_event_router_and_process_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(config=VoxelPrototypeConfig(game_flow_enabled=True))
+    captures: list[bool] = []
+    keys: list[int] = []
+    clicks: list[int] = []
+
+    def capture_mouse(value: bool) -> None:
+        captures.append(value)
+        application.mouse_captured = value
+
+    monkeypatch.setattr(application, "_capture_mouse", capture_mouse)
+    monkeypatch.setattr(application, "_process_overlay_key", keys.append)
+    monkeypatch.setattr(
+        application,
+        "_process_overlay_click",
+        lambda event: clicks.append(event.button),
+    )
+    application._process_flow_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.WINDOWFOCUSLOST)
+    )
+    application._process_flow_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_DOWN)
+    )
+    application._process_flow_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(0, 0))
+    )
+    application.flow.screen = VoxelScreen.INVENTORY
+    selected = application.inventory_screen.selected_recipe_index
+    application._process_flow_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEWHEEL, y=-1)
+    )
+    assert captures == [False]
+    assert keys == [pygame.K_DOWN]
+    assert clicks == [1]
+    assert application.inventory_screen.selected_recipe_index == selected + 1
+
+    application.running = True
+    monkeypatch.setattr(
+        pygame.event,
+        "get",
+        lambda: [pygame.event.Event(pygame.QUIT)],
+    )
+    application.process_events()
+    assert not application.running
+
+
+def test_game_flow_noop_event_and_action_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(config=VoxelPrototypeConfig(game_flow_enabled=True))
+    application._process_flow_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEMOTION, rel=(0, 0))
+    )
+
+    application.flow.start_new_world()
+    application._process_overlay_key(pygame.K_ESCAPE)  # type: ignore[attr-defined]
+    application.flow.return_to_main_menu()
+    application._process_overlay_key(pygame.K_F3)  # type: ignore[attr-defined]
+    application.flow.mark_dead()
+    application._process_overlay_key(pygame.K_F3)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(application, "_hud_pointer", lambda position: position)
+    application.flow.screen = VoxelScreen.INVENTORY
+    application._process_overlay_key(pygame.K_F3)  # type: ignore[attr-defined]
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=2, pos=(76, 138))
+    )
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=2, pos=(626, 116))
+    )
+    application.flow.return_to_main_menu()
+    application._process_overlay_click(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(0, 0))
+    )
+
+    application.flow.return_to_main_menu()
+    application.flow.set_continue_available(False)
+    monkeypatch.setattr(application, "_load_edits", lambda: True)
+    captures: list[bool] = []
+    monkeypatch.setattr(application, "_capture_mouse", captures.append)
+    application._activate_flow_action(GameFlowAction.CONTINUE)  # type: ignore[attr-defined]
+    assert application.flow.screen is VoxelScreen.MAIN_MENU
+    assert captures == []
+
+    application._activate_flow_action(GameFlowAction.RESUME)  # type: ignore[attr-defined]
+    application._activate_flow_action(GameFlowAction.RESPAWN)  # type: ignore[attr-defined]
+    application._open_pause_menu()  # type: ignore[attr-defined]
+    application._open_inventory_screen()  # type: ignore[attr-defined]
+
+    application.flow.start_new_world()
+    monkeypatch.setattr(application.inventory, "cycle_hotbar", lambda _direction: False)
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEWHEEL, y=0)
+    )
+    application.mouse_captured = True
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=4)
+    )
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=2)
+    )
+    application._process_flow_gameplay_event(  # type: ignore[attr-defined]
+        pygame.event.Event(pygame.MOUSEBUTTONUP, button=2)
+    )
+
+
+def test_game_flow_death_transition_waits_for_explicit_respawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(config=VoxelPrototypeConfig(game_flow_enabled=True))
+    application.flow.start_new_world()
+    application.mouse_captured = True
+    application.vitals.restore(
+        PlayerVitalsSnapshot(
+            health_milli=16_000,
+            stamina_milli=50_000,
+            grounded=False,
+            accumulated_fall_milli=5_000,
+        )
+    )
+    application.player = PlayerState(x=1, y=9, z=1, grounded=False)
+
+    class Keys:
+        def __getitem__(self, _key: int) -> bool:
+            return False
+
+    captures: list[bool] = []
+    monkeypatch.setattr(pygame.key, "get_pressed", Keys)
+    monkeypatch.setattr(
+        voxel_application,
+        "move_player",
+        lambda **_kwargs: PlayerState(x=1, y=8, z=1, grounded=True),
+    )
+    monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
+    monkeypatch.setattr(application, "_capture_mouse", captures.append)
+
+    application.update(0.01)
+
+    assert application.flow.screen is VoxelScreen.DEAD
+    assert application.vitals.snapshot.death_count == 0
+    assert not application._mining_held  # type: ignore[attr-defined]
+    assert application.target is None
+    assert captures == [False]
+
+
+def test_game_flow_overlay_is_composed_by_the_authoritative_hud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Resource:
+        def write(self, _data: bytes) -> None:
+            return None
+
+        def use(self, *, location: int) -> None:
+            assert location == 1
+
+        def render(self, _mode: int) -> None:
+            return None
+
+    class Context:
+        def disable(self, _flag: int) -> None:
+            return None
+
+        def enable(self, _flag: int) -> None:
+            return None
+
+    pygame.init()
+    pygame.font.init()
+    try:
+        application = VoxelPrototypeApplication(config=VoxelPrototypeConfig(game_flow_enabled=True))
+        application.context = cast(Any, Context())
+        application._hud_texture = cast(Any, Resource())  # type: ignore[attr-defined]
+        application._hud_array = cast(Any, Resource())  # type: ignore[attr-defined]
+        application._font = pygame.font.Font(None, 22)  # type: ignore[attr-defined]
+        application.inventory.set_slot(0, ItemStack(item=ItemType.WOOD_LOG, quantity=2))
+        application.save_message = ""
+        monkeypatch.setattr(pygame.time, "get_ticks", lambda: 10_000)
+
+        application._render_hud(0)  # type: ignore[attr-defined]
+
+        assert application.hud_snapshot is not None
+        assert application.hud_snapshot.selected_item == ItemType.WOOD_LOG.value
+        assert application.hud_snapshot.selected_material is None
+        assert application.flow.screen is VoxelScreen.MAIN_MENU
+    finally:
+        pygame.quit()
