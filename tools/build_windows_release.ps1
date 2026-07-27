@@ -20,7 +20,8 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
 if (-not (Test-Path -LiteralPath "pyproject.toml")) {
     throw "Run this script from the repository root."
 }
-if ((git status --porcelain).Length -ne 0) {
+$workingTreeChanges = @(git status --porcelain)
+if ($workingTreeChanges.Count -ne 0) {
     git status --short
     throw "The working tree must be clean before packaging."
 }
