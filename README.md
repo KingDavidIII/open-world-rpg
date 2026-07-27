@@ -2,53 +2,49 @@
 
 A production-quality open-world role-playing game written in Python.
 
-The project is being developed incrementally with clean architecture,
-deterministic world generation, explicit application lifecycles, testable
-gameplay systems, and persistent save support.
+The project is developed incrementally with clean architecture, deterministic
+world generation, explicit application lifecycles, testable gameplay systems,
+and persistent save support.
 
 ## Current milestone
 
-**v0.8.0 - Tools and Survival Foundation**
+**v0.9.0 - Playable Survival Loop**
 
-The tools and survival foundation includes:
+This release turns the voxel foundation into a guided, self-contained survival
+prototype that can be launched and played without developer instructions.
 
-- Central item and tool catalogue policy
-- Wooden and stone pickaxes
-- Wooden and stone shovels
-- Pickaxe, shovel, wood-tier and stone-tier classification
-- Non-stackable tool instances
-- Wood durability of 64 and stone durability of 128
-- Mixed ItemStack and ToolInstance inventory slots
-- 27-slot inventory with a nine-slot hotbar
-- Deterministic survival starter inventory
-- Atomic tool replacement and destruction
-- Block hardness and tool-effectiveness policies
-- Hold-to-mine interaction
-- Mining cancellation on release, target loss, range loss and selection changes
-- Exactly-once block edits, resource drops and durability consumption
-- Tool durability loss and tool-breaking feedback
-- Player health and stamina
-- Sprint stamina drain
-- Jump stamina cost
-- Delayed stamina regeneration
-- Fall damage with flying and water immunity
-- Death counting and safe respawn
-- Inventory, block-edit and dropped-resource preservation after respawn
-- Health, stamina, mining progress and durability HUD indicators
-- Tool effectiveness and damage feedback
-- Tool durability, vitals and death-count persistence
-- Legacy schema-v1 stack-only save compatibility
-- Atomic failed-load behaviour
-- Active-mining cancellation after loading
-- Frame-local terrain-column caching for collision queries
-- Controlled mining and sprinting performance gates
-- 1,618 passing tests
+The playable loop includes:
+
+- Main menu with New World, Continue, and Quit
+- First-launch three-page control and progression guide
+- Empty new-world inventory with three starter logs placed near spawn
+- Persistent objective tracking from wood gathering to the Stone Age
+- Full 27-slot inventory with a nine-slot hotbar
+- Keyboard and mouse inventory interaction
+- Atomic slot movement, merging, swapping, and quick-move behaviour
+- Logs, planks, sticks, and persistence-safe crafting resources
+- Wooden and stone pickaxe and shovel recipes
+- Recipe progression gates that require wooden tools before stone tools
+- Hold-to-mine interaction with block hardness and tool effectiveness
+- Stone mining restricted to an equipped pickaxe during progression play
+- Block placement with reach and player-collision protection
+- Valid and invalid interaction previews
+- Wooden and stone tool durability and breakage
+- Health, stamina, sprinting, jumping, fall damage, death, and safe respawn
+- Pause, inventory/crafting, death, guide, and completion screens
+- Save, Save & Quit, Continue, and Quit Without Saving flows
+- Additive schema-v1 persistence for inventory, tools, vitals, deaths, world edits,
+  dropped resources, and survival progression
+- Safe progression inference for legacy schema-v1 saves
+- Cached inventory atlas rendering and bounded progression checks
+- Module and installed CLI smoke-test support
+- 1,670 passing automated tests
 - Zero skipped tests
 - 100% statement and branch coverage
 
 ## Requirements
 
-- Python 3.11 or newer
+- Python 3.11 or 3.12
 - Git
 - A Python virtual environment
 
@@ -79,6 +75,9 @@ Or use the installed voxel command:
 
     open-world-rpg-voxel-demo
 
+The normal voxel launch opens the playable menu and progression flow. Use
+`--direct-play` only for the developer-oriented direct world entry.
+
 ### Voxel controls
 
 - `W A S D`: move
@@ -90,32 +89,24 @@ Or use the installed voxel command:
 - `Right mouse`: place the selected block
 - `1-9` or mouse wheel: select a hotbar slot
 - `E` or `Tab`: open inventory and crafting
-- `Arrow keys`: navigate menus and inventory slots
+- `Arrow keys`: navigate menus, inventory slots, and recipes
 - `Enter`: activate a menu option or move a selected slot
 - `Q`: quick-move the selected inventory slot
 - `[` / `]` or `Page Up` / `Page Down`: select a recipe
 - `C`: craft the selected recipe
-- `Escape`: pause, close inventory, or resume
+- `Escape`: pause, close inventory, skip the guide, or resume
 - `F1` or `H`: toggle the in-game control guide
 - `F3`: toggle diagnostics
 
-The current development candidate includes the v0.9.0 Sprint 1 core-playability
-work and Sprint 2 inventory, crafting, and game-flow systems. Interactive voxel
-launches now open a main menu, while `--direct-play` keeps the developer path
-available. The released package version remains v0.8.0 until the complete
-v0.9.0 release cycle is prepared.
+### Survival objective
 
-
-### v0.9.0 Sprint 2 candidate
-
-- Main, pause, inventory/crafting, and death screens
-- New World, Continue, Save, Save & Quit, and Respawn flows
-- Full 27-slot inventory interaction
-- Atomic slot move, merge, swap, split, and quick-move policies
-- Logs, planks, and sticks as persistence-safe crafting resources
-- Wooden and stone pickaxe and shovel recipes
-- Atomic crafting with inventory-capacity protection
-- Tool durability display in the inventory screen
+    Collect three logs
+    -> craft wood planks
+    -> craft sticks
+    -> craft a wooden pickaxe
+    -> mine three stone blocks
+    -> craft a stone pickaxe
+    -> reach the Stone Age completion screen
 
 ## Quality checks
 
@@ -129,26 +120,27 @@ v0.9.0 release cycle is prepared.
 ## Project structure
 
     OpenWorldRPG_Rebuild/
-    ├── saves/
-    ├── src/
-    │   └── open_world_rpg/
-    │       ├── application/
-    │       ├── core/
-    │       ├── engine/
-    │       ├── entities/
-    │       ├── gameplay/
-    │       ├── persistence/
-    │       ├── ui/
-    │       └── world/
-    ├── tests/
-    │   ├── integration/
-    │   └── unit/
-    ├── LICENSE
-    ├── README.md
-    └── pyproject.toml
+    |-- docs/
+    |-- saves/
+    |-- src/
+    |   `-- open_world_rpg/
+    |       |-- application/
+    |       |-- core/
+    |       |-- engine/
+    |       |-- entities/
+    |       |-- gameplay/
+    |       |-- persistence/
+    |       |-- ui/
+    |       `-- world/
+    |-- tests/
+    |   |-- integration/
+    |   `-- unit/
+    |-- LICENSE
+    |-- README.md
+    `-- pyproject.toml
 
 ## Development status
 
-The project is under active development. The current executable confirms that
-the package, module entry point, installed CLI command, and development tooling
-are functioning correctly.
+v0.9.0 is the final pre-1.0 feature milestone. The next phase is controlled
+stabilisation, playtesting, balancing, performance tuning, packaging, and the
+v1.0.0 foundation release.
