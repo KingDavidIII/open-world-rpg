@@ -13,21 +13,31 @@ from open_world_rpg.world import (
 from .blocks import MAX_DISPLAY_HEIGHT, BlockColumn
 
 MIN_EDITABLE_BLOCK_Y = 0
-MAX_EDITABLE_BLOCK_Y = MAX_DISPLAY_HEIGHT
+MAX_EDITABLE_BLOCK_Y = MAX_DISPLAY_HEIGHT + 16
 
 ColumnLookup = Callable[[int, int], BlockColumn]
+NaturalMaterialLookup = Callable[[int, int, int], BlockMaterial]
 
 
 class EditableVoxelWorld:
     """Resolve immutable generated columns through a mutable edit overlay."""
 
-    def __init__(self, *, column_at: ColumnLookup, edits: BlockEditStore) -> None:
+    def __init__(
+        self,
+        *,
+        column_at: ColumnLookup,
+        edits: BlockEditStore,
+        natural_material_at: NaturalMaterialLookup | None = None,
+    ) -> None:
         if not callable(column_at):
             raise TypeError("column_at must be callable.")
         if not isinstance(edits, BlockEditStore):
             raise TypeError("edits must be a BlockEditStore.")
+        if natural_material_at is not None and not callable(natural_material_at):
+            raise TypeError("natural_material_at must be callable or None.")
         self._column_at = column_at
         self._edits = edits
+        self._natural_material_at = natural_material_at
 
     @property
     def edits(self) -> BlockEditStore:
@@ -50,6 +60,8 @@ class EditableVoxelWorld:
             )
         if column.water is not None and coordinate.y < column.surface_height:
             return BlockMaterial.WATER
+        if self._natural_material_at is not None:
+            return self._natural_material_at(coordinate.x, coordinate.y, coordinate.z)
         return BlockMaterial.AIR
 
     def material_at(self, x: int, y: int, z: int) -> BlockMaterial:

@@ -75,8 +75,8 @@ GUIDE_PAGES: Final[tuple[tuple[str, str], ...]] = (
     (
         "BUILD YOUR FIRST TOOL",
         (
-            "Collect the three bright logs directly ahead. Press E, craft planks and sticks, "
-            "then craft a wooden pickaxe."
+            "Break the starter tree directly ahead and collect three logs. "
+            "Press E, craft planks and sticks, then craft a wooden pickaxe."
         ),
     ),
     (
@@ -157,7 +157,7 @@ class SurvivalProgression:
         objectives = {
             ProgressionStage.COLLECT_WOOD: ProgressionObjective(
                 title="Gather wood",
-                instruction="Collect the three bright starter logs directly ahead.",
+                instruction="Break the starter tree directly ahead and collect three logs.",
                 progress=f"{min(logs, WOOD_LOG_TARGET)}/{WOOD_LOG_TARGET} logs",
             ),
             ProgressionStage.CRAFT_PLANKS: ProgressionObjective(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from array import array
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from open_world_rpg.world import (
@@ -11,9 +11,11 @@ from open_world_rpg.world import (
     BlockMaterial,
     ChunkCoordinate,
     ChunkTerrain,
+    WorldBlockCoordinate,
 )
 
-from .blocks import MAX_DISPLAY_HEIGHT, BlockColumn, BlockType, column_from_terrain
+from .blocks import BlockColumn, BlockType, column_from_terrain
+from .editable_world import MAX_EDITABLE_BLOCK_Y
 from .scenery import SceneryKind, scenery_at
 from .texture_atlas import FaceTexture, atlas_uv
 
@@ -40,16 +42,67 @@ class VoxelChunkMesh:
         return self.opaque_vertex_count + self.water_vertex_count
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChunkMeshSnapshot:
+    """Thread-safe immutable inputs for one CPU-only chunk mesh build."""
+
+    terrain: ChunkTerrain
+    columns: Mapping[tuple[int, int], BlockColumn]
+    edits: Mapping[WorldBlockCoordinate, BlockMaterial]
+    natural_blocks: Mapping[WorldBlockCoordinate, BlockMaterial]
+    editable: bool
+
+    def build(self) -> VoxelChunkMesh:
+        def column_at(world_x: int, world_z: int) -> BlockColumn:
+            return self.columns[(world_x, world_z)]
+
+        if not self.editable:
+            return build_chunk_mesh(terrain=self.terrain, column_at_world=column_at)
+
+        def block_at(world_x: int, world_y: int, world_z: int) -> BlockMaterial:
+            coordinate = WorldBlockCoordinate(x=world_x, y=world_y, z=world_z)
+            edited = self.edits.get(coordinate)
+            if edited is not None:
+                return edited
+            natural = self.natural_blocks.get(coordinate)
+            if natural is not None:
+                return natural
+            column = column_at(world_x, world_z)
+            if world_y <= column.ground_height:
+                if world_y == column.ground_height:
+                    return column.surface
+                if world_y >= column.ground_height - 3:
+                    return column.subsurface
+                return BlockMaterial.STONE
+            if column.water is not None and world_y < column.surface_height:
+                return BlockMaterial.WATER
+            return BlockMaterial.AIR
+
+        return build_chunk_mesh(
+            terrain=self.terrain,
+            column_at_world=column_at,
+            block_at_world=block_at,
+        )
+
+
 def mesh_cache_key(
-    *, terrain: ChunkTerrain, neighbour_revisions: tuple[int, int, int, int]
-) -> tuple[ChunkCoordinate, int, tuple[int, int, int, int], str, int]:
+    *,
+    terrain: ChunkTerrain,
+    neighbour_revisions: tuple[int, int, int, int],
+    edit_revision: int = 0,
+) -> tuple[ChunkCoordinate, int, tuple[int, int, int, int], str, int, int]:
     """Invalidate terrain, edge, format, or visual mesh-contract changes."""
+    if isinstance(edit_revision, bool) or not isinstance(edit_revision, int):
+        raise TypeError("edit_revision must be an integer.")
+    if edit_revision < 0:
+        raise ValueError("edit_revision must be non-negative.")
     return (
         terrain.chunk_coordinate,
         terrain.revision,
         neighbour_revisions,
         terrain.generation_format_version,
-        2,
+        3,
+        edit_revision,
     )
 
 
@@ -70,10 +123,13 @@ def _material_texture(material: BlockMaterial, *, top: bool) -> FaceTexture:
         return FaceTexture.GRASS_TOP if top else FaceTexture.GRASS_SIDE
     if material is BlockMaterial.SNOW:
         return FaceTexture.SNOW_TOP if top else FaceTexture.SNOW_SIDE
+    if material is BlockMaterial.WOOD:
+        return FaceTexture.LOG_TOP if top else FaceTexture.LOG_SIDE
     return {
         BlockMaterial.DIRT: FaceTexture.DIRT,
         BlockMaterial.STONE: FaceTexture.STONE,
         BlockMaterial.SAND: FaceTexture.SAND,
+        BlockMaterial.LEAVES: FaceTexture.LEAVES,
         BlockMaterial.WATER: FaceTexture.SHALLOW_WATER,
     }[material]
 
@@ -163,17 +219,24 @@ def _add_scenery(
     if kind is SceneryKind.TREE:
         _cube(
             output,
-            minimum=(x + 0.35, y, z + 0.35),
-            maximum=(x + 0.65, y + 4, z + 0.65),
-            top=FaceTexture.DIRT,
-            side=FaceTexture.DIRT,
+            minimum=(x, y + 1, z),
+            maximum=(x + 1, y + 5, z + 1),
+            top=FaceTexture.LOG_TOP,
+            side=FaceTexture.LOG_SIDE,
         )
         _cube(
             output,
-            minimum=(x - 0.5, y + 3, z - 0.5),
-            maximum=(x + 1.5, y + 5.5, z + 1.5),
-            top=FaceTexture.GRASS_TOP,
-            side=FaceTexture.GRASS_TOP,
+            minimum=(x - 1, y + 4, z - 1),
+            maximum=(x + 2, y + 6, z + 2),
+            top=FaceTexture.LEAVES,
+            side=FaceTexture.LEAVES,
+        )
+        _cube(
+            output,
+            minimum=(x, y + 6, z),
+            maximum=(x + 1, y + 7, z + 1),
+            top=FaceTexture.LEAVES,
+            side=FaceTexture.LEAVES,
         )
     elif kind is SceneryKind.ROCK:
         _cube(
@@ -392,7 +455,7 @@ def _build_editable_chunk_mesh(
             world_x = origin.x + local_x
             world_z = origin.y + local_z
             column = column_at_world(world_x, world_z)
-            highest = max(column.surface_height, column.ground_height, MAX_DISPLAY_HEIGHT)
+            highest = max(column.surface_height, column.ground_height, MAX_EDITABLE_BLOCK_Y)
             for y in range(0, highest + 1):
                 material = block_at_world(world_x, y, world_z)
                 if material is BlockMaterial.AIR:
@@ -435,7 +498,7 @@ def _build_editable_chunk_mesh(
                 if surface_material is column.surface and above_material is BlockMaterial.AIR
                 else None
             )
-            if scenery is not None:
+            if scenery is not None and scenery.kind is not SceneryKind.TREE:
                 _add_scenery(
                     opaque,
                     kind=scenery.kind,

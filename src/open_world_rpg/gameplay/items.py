@@ -131,6 +131,10 @@ def item_for_material(material: BlockMaterial) -> ItemType | None:
     """Return the collectible produced by a block, if any."""
     if not isinstance(material, BlockMaterial):
         raise TypeError("material must be a BlockMaterial.")
+    if material is BlockMaterial.WOOD:
+        return ItemType.WOOD_LOG
+    if material is BlockMaterial.LEAVES:
+        return None
     return next(
         (item for item, policy in _ITEM_POLICIES.items() if policy.placeable_material is material),
         None,

@@ -38,7 +38,9 @@ from .interaction import (
     invalidated_chunks_for_edit,
 )
 from .inventory_ui import InventoryActionResult, InventoryScreenController
-from .meshing import VoxelChunkMesh, build_chunk_mesh, mesh_cache_key
+from .meshing import ChunkMeshSnapshot, VoxelChunkMesh, build_chunk_mesh, mesh_cache_key
+from .natural_blocks import TreeShape, natural_blocks_in_area, tree_shape
+from .performance import FrameTimeTracker, FrameTimingSnapshot
 from .scenery import SceneryKind, SceneryPlacement, scenery_at
 from .spawn import select_spawn
 from .streaming import streaming_chunks
@@ -55,10 +57,13 @@ __all__ = [
     "Aabb",
     "BlockColumn",
     "BlockType",
+    "ChunkMeshSnapshot",
     "ControlHint",
     "EditableVoxelWorld",
     "FaceTexture",
     "FirstPersonCamera",
+    "FrameTimeTracker",
+    "FrameTimingSnapshot",
     "GameFlowAction",
     "GameFlowController",
     "InteractionOutcome",
@@ -71,6 +76,7 @@ __all__ = [
     "RayHit",
     "SceneryKind",
     "SceneryPlacement",
+    "TreeShape",
     "VoxelChunkMesh",
     "VoxelHotbar",
     "VoxelHudSnapshot",
@@ -84,6 +90,7 @@ __all__ = [
     "invalidated_chunks_for_edit",
     "mesh_cache_key",
     "move_player",
+    "natural_blocks_in_area",
     "normalise_movement_axes",
     "player_intersects_block",
     "ray_cast",
@@ -91,4 +98,5 @@ __all__ = [
     "scenery_at",
     "select_spawn",
     "streaming_chunks",
+    "tree_shape",
 ]

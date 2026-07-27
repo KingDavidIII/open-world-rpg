@@ -13,6 +13,7 @@ from open_world_rpg.ui.voxel import (
     DISPLAY_SEA_LEVEL,
     BlockColumn,
     BlockType,
+    ChunkMeshSnapshot,
     EditableVoxelWorld,
     FirstPersonCamera,
     PlayerState,
@@ -207,6 +208,23 @@ def test_mesh_is_deterministic_compact_and_cache_key_tracks_neighbours(
     assert mesh.triangle_count == mesh.vertex_count // 3
     key = mesh_cache_key(terrain=terrain, neighbour_revisions=(0, 0, 0, 0))
     assert key != mesh_cache_key(terrain=terrain, neighbour_revisions=(1, 0, 0, 0))
+    assert key != mesh_cache_key(
+        terrain=terrain,
+        neighbour_revisions=(0, 0, 0, 0),
+        edit_revision=1,
+    )
+    with pytest.raises(TypeError):
+        mesh_cache_key(
+            terrain=terrain,
+            neighbour_revisions=(0, 0, 0, 0),
+            edit_revision=True,
+        )
+    with pytest.raises(ValueError):
+        mesh_cache_key(
+            terrain=terrain,
+            neighbour_revisions=(0, 0, 0, 0),
+            edit_revision=-1,
+        )
     low_column = BlockColumn(
         ground_height=1,
         surface_height=1,
@@ -292,3 +310,50 @@ def test_mesh_is_deterministic_compact_and_cache_key_tracks_neighbours(
     )
     assert scenery_mesh.water_vertex_count == 0
     assert scenery_mesh.opaque_vertex_count > CHUNK_SIZE * CHUNK_SIZE * 6
+
+
+def test_chunk_mesh_snapshot_builds_fast_and_editable_resolvers() -> None:
+    runtime = create_terrain_runtime(
+        world=WorldSpecification(name="Snapshot", seed=WorldSeed(value=5)),
+        config=TerrainGenerationConfig(octave_count=1),
+    )
+    coordinate = ChunkCoordinate(x=0, y=0)
+    terrain = runtime.get_or_generate(coordinate)
+
+    def column_at(world_x: int, world_z: int) -> BlockColumn:
+        chunk = runtime.get_or_generate(
+            ChunkCoordinate(x=world_x // CHUNK_SIZE, y=world_z // CHUNK_SIZE)
+        )
+        tile = chunk.tiles[(world_z % CHUNK_SIZE) * CHUNK_SIZE + world_x % CHUNK_SIZE]
+        return column_from_terrain(
+            terrain_type=tile.terrain_type,
+            elevation_metres=tile.elevation.metres,
+        )
+
+    columns = {
+        (x, z): column_at(x, z)
+        for z in range(-1, CHUNK_SIZE + 1)
+        for x in range(-1, CHUNK_SIZE + 1)
+    }
+    fast = ChunkMeshSnapshot(
+        terrain=terrain,
+        columns=columns,
+        edits={},
+        natural_blocks={},
+        editable=False,
+    )
+    assert fast.build() == build_chunk_mesh(terrain=terrain, column_at_world=column_at)
+
+    surface_y = columns[(0, 0)].ground_height
+    removed = WorldBlockCoordinate(x=0, y=surface_y, z=0)
+    wood = WorldBlockCoordinate(x=1, y=columns[(1, 0)].ground_height + 1, z=0)
+    editable = ChunkMeshSnapshot(
+        terrain=terrain,
+        columns=columns,
+        edits={removed: BlockMaterial.AIR},
+        natural_blocks={wood: BlockMaterial.WOOD},
+        editable=True,
+    )
+    mesh = editable.build()
+    assert mesh.coordinate == coordinate
+    assert mesh.opaque_vertex_count > 0

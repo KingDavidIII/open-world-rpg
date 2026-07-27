@@ -17,6 +17,8 @@ class BlockMaterial(StrEnum):
     STONE = "stone"
     SAND = "sand"
     SNOW = "snow"
+    WOOD = "wood"
+    LEAVES = "leaves"
     WATER = "water"
 
     @property

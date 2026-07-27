@@ -42,6 +42,9 @@ def test_texture_atlas_is_complete_crisp_and_deterministic() -> None:
     assert top_texture(BlockType.GRASS) is FaceTexture.GRASS_TOP
     assert top_texture(BlockType.WATER) is FaceTexture.SHALLOW_WATER
     assert _material_texture(BlockType.SNOW, top=False) is FaceTexture.SNOW_SIDE
+    assert _material_texture(BlockType.WOOD, top=True) is FaceTexture.LOG_TOP
+    assert _material_texture(BlockType.WOOD, top=False) is FaceTexture.LOG_SIDE
+    assert _material_texture(BlockType.LEAVES, top=False) is FaceTexture.LEAVES
     with pytest.raises(TypeError):
         atlas_uv("grass")  # type: ignore[arg-type]
 

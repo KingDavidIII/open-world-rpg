@@ -7,6 +7,8 @@ import math
 import struct
 import time
 from array import array
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,7 +63,7 @@ from .collision import (
     safe_spawn_height,
 )
 from .controls import DEFAULT_CONTROL_HINTS, normalise_movement_axes
-from .editable_world import EditableVoxelWorld
+from .editable_world import MAX_EDITABLE_BLOCK_Y, EditableVoxelWorld
 from .game_flow import GameFlowAction, GameFlowController, VoxelScreen
 from .hotbar import VoxelHotbar
 from .hud import VoxelHudSnapshot
@@ -73,7 +75,9 @@ from .interaction import (
 )
 from .inventory_ui import InventoryScreenController
 from .item_rendering import build_dropped_item_vertices
-from .meshing import VoxelChunkMesh, build_chunk_mesh, mesh_cache_key
+from .meshing import ChunkMeshSnapshot, VoxelChunkMesh, mesh_cache_key
+from .natural_blocks import natural_blocks_in_area, tree_shape
+from .performance import FrameTimeTracker
 from .scenery import scenery_at
 from .shaders import (
     FRAGMENT_SHADER,
@@ -190,7 +194,7 @@ class VoxelPrototypeConfig:
 class GpuChunk:
     """Owned ModernGL resources for one cached render chunk."""
 
-    key: tuple[ChunkCoordinate, int, tuple[int, int, int, int], str, int]
+    key: tuple[ChunkCoordinate, int, tuple[int, int, int, int], str, int, int]
     opaque_buffer: moderngl.Buffer
     opaque_array: moderngl.VertexArray
     water_buffer: moderngl.Buffer | None
@@ -325,7 +329,14 @@ class VoxelPrototypeApplication:
                 logger=logging.getLogger("open_world_rpg"),
             )
         self.edits = BlockEditStore()
-        self.editable_world = EditableVoxelWorld(column_at=self._column_at, edits=self.edits)
+        self._natural_chunk_cache: dict[
+            ChunkCoordinate, dict[WorldBlockCoordinate, BlockMaterial]
+        ] = {}
+        self.editable_world = EditableVoxelWorld(
+            column_at=self._column_at,
+            edits=self.edits,
+            natural_material_at=self._natural_material_at,
+        )
         self.interactions = VoxelInteractionController(
             world=self.editable_world,
             edits=self.edits,
@@ -363,6 +374,7 @@ class VoxelPrototypeApplication:
         self.spawn_z = 8
         self.running = False
         self.fps = 0.0
+        self.frame_timing = FrameTimeTracker()
         self.render_distance = self.config.render_distance
         self.loading = False
         self.show_help = False
@@ -399,9 +411,28 @@ class VoxelPrototypeApplication:
         self._gpu_chunks: dict[ChunkCoordinate, GpuChunk] = {}
         self._visible: tuple[ChunkCoordinate, ...] = ()
         self._stream_signature: tuple[int, int, int] | None = None
+        self._wanted_chunks: tuple[ChunkCoordinate, ...] = ()
+        self._terrain_queue: deque[ChunkCoordinate] = deque()
+        self._mesh_queue: deque[ChunkCoordinate] = deque()
+        self._mesh_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="open-world-rpg-mesh",
+        )
+        self._mesh_futures: dict[
+            ChunkCoordinate,
+            tuple[
+                tuple[ChunkCoordinate, int, tuple[int, int, int, int], str, int, int],
+                Future[VoxelChunkMesh],
+            ],
+        ] = {}
         self._generation_seconds = 0.0
         self._mesh_seconds = 0.0
         self._next_hud_refresh = float("-inf")
+        self._movement_velocity_x = 0.0
+        self._movement_velocity_z = 0.0
+        self._walk_cycle = 0.0
+        self._view_bob = 0.0
+        self._current_fov = 72.0
 
     @property
     def hotbar(self) -> VoxelHotbar:
@@ -573,12 +604,15 @@ class VoxelPrototypeApplication:
         completed = False
         try:
             while self.running and (max_frames is None or frames < max_frames):
+                frame_started = time.perf_counter()
                 assert self._clock is not None
                 delta = min(0.05, self._clock.tick(self.config.target_fps) / 1000.0)
-                self.fps = self._clock.get_fps()
                 self.process_events()
                 self.update(delta)
                 self.render()
+                elapsed = max(time.perf_counter() - frame_started, 1e-9)
+                self.frame_timing.record(elapsed)
+                self.fps = self.frame_timing.snapshot.average_fps
                 frames += 1
             completed = True
             return 0
@@ -638,11 +672,11 @@ class VoxelPrototypeApplication:
                 elif event.key == pygame.K_F5:
                     self.render_distance = max(1, self.render_distance - 1)
                     self._stream_signature = None
-                    self._stream()
+                    self._stream(blocking=False)
                 elif event.key == pygame.K_F6:
                     self.render_distance = min(4, self.render_distance + 1)
                     self._stream_signature = None
-                    self._stream()
+                    self._stream(blocking=False)
                 elif event.key == pygame.K_F7:
                     self._save_edits()
                 elif event.key == pygame.K_F8:
@@ -735,11 +769,11 @@ class VoxelPrototypeApplication:
             elif event.key == pygame.K_F5:
                 self.render_distance = max(1, self.render_distance - 1)
                 self._stream_signature = None
-                self._stream()
+                self._stream(blocking=False)
             elif event.key == pygame.K_F6:
                 self.render_distance = min(4, self.render_distance + 1)
                 self._stream_signature = None
-                self._stream()
+                self._stream(blocking=False)
             elif event.key == pygame.K_F7:
                 self._save_edits()
             elif event.key == pygame.K_F8:
@@ -964,7 +998,12 @@ class VoxelPrototypeApplication:
 
     def _reset_new_world(self) -> None:
         self.edits = BlockEditStore()
-        self.editable_world = EditableVoxelWorld(column_at=self._column_at, edits=self.edits)
+        self._natural_chunk_cache.clear()
+        self.editable_world = EditableVoxelWorld(
+            column_at=self._column_at,
+            edits=self.edits,
+            natural_material_at=self._natural_material_at,
+        )
         self.interactions = VoxelInteractionController(
             world=self.editable_world,
             edits=self.edits,
@@ -978,21 +1017,7 @@ class VoxelPrototypeApplication:
         self.dropped_items = DroppedItemManager()
         self.progression = SurvivalProgression()
         if self.config.progression_enabled:
-            forward_x, _, forward_z = self.camera.forward
-            right_x, _, right_z = self.camera.right
-            for distance, lateral in ((2.25, -0.7), (2.7, 0.0), (2.25, 0.7)):
-                position_x = self.spawn_x + 0.5 + forward_x * distance + right_x * lateral
-                position_z = self.spawn_z + 0.5 + forward_z * distance + right_z * lateral
-                local_floor = safe_spawn_height(
-                    world_x=math.floor(position_x),
-                    world_z=math.floor(position_z),
-                    height_at=self._height_at,
-                )
-                self.dropped_items.spawn(
-                    item=ItemType.WOOD_LOG,
-                    quantity=1,
-                    position=(position_x, local_floor + 0.35, position_z),
-                )
+            self._plant_starter_tree()
         self.vitals = PlayerVitals()
         self.last_interaction = InteractionResult.NONE
         self.last_pickup = "none"
@@ -1003,7 +1028,19 @@ class VoxelPrototypeApplication:
         self._stream_signature = None
         self._place_player_at_spawn()
         self._refresh_interaction_previews()
-        self._stream()
+        self._stream(blocking=False)
+
+    def _plant_starter_tree(self) -> None:
+        forward_x, _, forward_z = self.camera.forward
+        tree_x = math.floor(self.spawn_x + 0.5 + forward_x * 5.0)
+        tree_z = math.floor(self.spawn_z + 0.5 + forward_z * 5.0)
+        ground_y = self._height_at(tree_x, tree_z)
+        shape = tree_shape(world_x=tree_x, ground_y=ground_y, world_z=tree_z)
+        for coordinate in shape.trunk:
+            self.edits.set_block(coordinate, BlockMaterial.WOOD)
+        for coordinate in shape.leaves:
+            if coordinate.y <= MAX_EDITABLE_BLOCK_Y:
+                self.edits.set_block(coordinate, BlockMaterial.LEAVES)
 
     def _place_player_at_spawn(self) -> None:
         self.player = PlayerState(
@@ -1082,14 +1119,29 @@ class VoxelPrototypeApplication:
             microseconds, sprinting=sprinting, active=self.mouse_captured
         ):
             self.dirty = True
-        speed = (10.0 if sprinting else 5.0) * delta_seconds
+        movement_speed = 9.0 if sprinting else 5.2
         flat_forward = (math.sin(math.radians(self.camera.yaw_degrees)), 0.0)
         flat_right = (math.cos(math.radians(self.camera.yaw_degrees)), 0.0)
-        delta_x = (flat_forward[0] * axes.forward + flat_right[0] * axes.sideways) * speed
-        delta_z = (
+        desired_velocity_x = (
+            flat_forward[0] * axes.forward + flat_right[0] * axes.sideways
+        ) * movement_speed
+        desired_velocity_z = (
             -math.cos(math.radians(self.camera.yaw_degrees)) * axes.forward
             + math.sin(math.radians(self.camera.yaw_degrees)) * axes.sideways
-        ) * speed
+        ) * movement_speed
+        if not gameplay_active:
+            self._movement_velocity_x = 0.0
+            self._movement_velocity_z = 0.0
+        else:
+            response = 1.0 - math.exp(-(22.0 if axes.active else 30.0) * delta_seconds)
+            self._movement_velocity_x += (desired_velocity_x - self._movement_velocity_x) * response
+            self._movement_velocity_z += (desired_velocity_z - self._movement_velocity_z) * response
+        delta_x = self._movement_velocity_x * delta_seconds
+        delta_z = self._movement_velocity_z * delta_seconds
+        target_fov = 78.0 if sprinting and axes.active else 72.0
+        self._current_fov += (target_fov - self._current_fov) * (
+            1.0 - math.exp(-10.0 * delta_seconds)
+        )
         jump_pressed = bool(gameplay_active and keys[pygame.K_SPACE])
         jump_requested = (
             jump_pressed
@@ -1124,7 +1176,7 @@ class VoxelPrototypeApplication:
                 return BlockMaterial.STONE.is_solid
             if column.water is not None and y < column.surface_height:
                 return BlockMaterial.WATER.is_solid
-            return False
+            return self._natural_material_at(x, y, z).is_solid
 
         self.player = move_player(
             player=self.player,
@@ -1141,7 +1193,7 @@ class VoxelPrototypeApplication:
             )
             self.player = PlayerState(
                 x=self.player.x,
-                y=self.player.y + vertical * speed,
+                y=self.player.y + vertical * 5.0 * delta_seconds,
                 z=self.player.z,
                 flying=True,
             )
@@ -1170,7 +1222,14 @@ class VoxelPrototypeApplication:
             inventory=self.inventory,
         )
         self._apply_pickups(pickups)
-        self._stream()
+        horizontal_speed = math.hypot(self._movement_velocity_x, self._movement_velocity_z)
+        if self.player.grounded and axes.active and gameplay_active:
+            self._walk_cycle += horizontal_speed * delta_seconds * 1.65
+            target_bob = math.sin(self._walk_cycle * math.tau) * (0.055 if sprinting else 0.035)
+        else:
+            target_bob = 0.0
+        self._view_bob += (target_bob - self._view_bob) * (1.0 - math.exp(-14.0 * delta_seconds))
+        self._stream(blocking=False)
         self.target = ray_cast(
             origin=(self.player.x, self.player.y + 1.62, self.player.z),
             direction=self.camera.forward,
@@ -1211,13 +1270,13 @@ class VoxelPrototypeApplication:
             self._sky_array.render(moderngl.TRIANGLES)
             self.context.enable(moderngl.DEPTH_TEST)
         projection = _perspective(
-            field_of_view=72.0,
+            field_of_view=self._current_fov,
             aspect=width / max(1, height),
             near=0.1,
             far=float((self.render_distance + 2) * CHUNK_SIZE),
         )
         view = _view_matrix(
-            position=(self.player.x, self.player.y + 1.62, self.player.z),
+            position=(self.player.x, self.player.y + 1.62 + self._view_bob, self.player.z),
             forward=self.camera.forward,
         )
         cast(moderngl.Uniform, self.program["projection"]).write(projection)
@@ -1229,13 +1288,14 @@ class VoxelPrototypeApplication:
         cast(moderngl.Uniform, self.program["fog_near"]).value = float(
             self.render_distance * CHUNK_SIZE
         )
-        cast(moderngl.Uniform, self.program["fog_far"]).value = float(
-            (self.render_distance + 1.5) * CHUNK_SIZE
-        )
+        fog_far = float((self.render_distance + 1.5) * CHUNK_SIZE)
+        cast(moderngl.Uniform, self.program["fog_far"]).value = fog_far
         cast(moderngl.Uniform, self.program["water_time"]).value = pygame.time.get_ticks() / 1000.0
         triangles = 0
         for coordinate in self._visible:
-            gpu = self._gpu_chunks[coordinate]
+            gpu = self._gpu_chunks.get(coordinate)
+            if gpu is None:
+                continue
             gpu.opaque_array.render(moderngl.TRIANGLES)
             triangles += gpu.mesh.triangle_count
         self._refresh_drop_gpu()
@@ -1250,7 +1310,8 @@ class VoxelPrototypeApplication:
             player_x=self.player.x,
             player_z=self.player.z,
         ):
-            water_array = self._gpu_chunks[coordinate].water_array
+            gpu = self._gpu_chunks.get(coordinate)
+            water_array = None if gpu is None else gpu.water_array
             if water_array is not None:
                 water_array.render(moderngl.TRIANGLES)
         cast(Any, self.context).depth_mask = True
@@ -1299,6 +1360,12 @@ class VoxelPrototypeApplication:
 
     def shutdown(self) -> None:
         """Explicitly release GPU objects and suspend active terrain."""
+        for _, future in self._mesh_futures.values():
+            future.cancel()
+        self._mesh_futures.clear()
+        self._mesh_queue.clear()
+        self._terrain_queue.clear()
+        self._mesh_executor.shutdown(wait=False, cancel_futures=True)
         for gpu in self._gpu_chunks.values():
             try:
                 gpu.release()
@@ -1427,89 +1494,244 @@ class VoxelPrototypeApplication:
         self._drop_render_revision = self.dropped_items.revision
         self._drop_render_key = render_key
 
-    def _stream(self) -> None:
+    def _stream(self, *, blocking: bool = True) -> None:
+        """Synchronise or incrementally stream the chunks around the player."""
         signature = (
             math.floor(self.player.x) // CHUNK_SIZE,
             math.floor(self.player.z) // CHUNK_SIZE,
             self.render_distance,
         )
-        if signature == self._stream_signature:
-            return
-        wanted = streaming_chunks(
-            world_x=self.player.x,
-            world_z=self.player.z,
-            render_distance=self.render_distance,
+        if signature != self._stream_signature:
+            wanted = streaming_chunks(
+                world_x=self.player.x,
+                world_z=self.player.z,
+                render_distance=self.render_distance,
+            )
+            required = self._required_terrain_chunks(wanted)
+            self._wanted_chunks = wanted
+            self._terrain_queue = deque(
+                coordinate for coordinate in required if not self.runtime.contains(coordinate)
+            )
+            self._mesh_queue = deque(wanted)
+            self._stream_signature = signature
+            wanted_set = set(wanted)
+            for coordinate in self.runtime.coordinates():
+                if coordinate not in wanted_set and (
+                    self.runtime.metadata_at(coordinate).state is ChunkState.ACTIVE
+                ):
+                    self.runtime.suspend(coordinate)
+            for coordinate in tuple(self._gpu_chunks):
+                if coordinate not in wanted_set:
+                    self._gpu_chunks.pop(coordinate).release()
+
+        if blocking:
+            self._complete_stream_blocking()
+        else:
+            self._pump_streaming()
+
+    def _required_terrain_chunks(
+        self, wanted: tuple[ChunkCoordinate, ...]
+    ) -> tuple[ChunkCoordinate, ...]:
+        required = {
+            ChunkCoordinate(x=coordinate.x + offset_x, y=coordinate.y + offset_z)
+            for coordinate in wanted
+            for offset_z in (-1, 0, 1)
+            for offset_x in (-1, 0, 1)
+        }
+        centre_x = math.floor(self.player.x) // CHUNK_SIZE
+        centre_z = math.floor(self.player.z) // CHUNK_SIZE
+        return tuple(
+            sorted(
+                required,
+                key=lambda item: (
+                    abs(item.x - centre_x) + abs(item.y - centre_z),
+                    item.y,
+                    item.x,
+                ),
+            )
         )
-        wanted_set = set(wanted)
-        self.loading = any(not self.runtime.contains(item) for item in wanted)
-        if self.loading and pygame.display.get_init():
-            pygame.display.set_caption("Open World RPG Voxel | Generating terrain...")
-        generation_start = time.perf_counter()
-        for coordinate in wanted:
-            terrain = self.runtime.get_or_generate(coordinate)
+
+    def _complete_stream_blocking(self) -> None:
+        for _, future in self._mesh_futures.values():
+            future.cancel()
+        self._mesh_futures.clear()
+        generation_started = time.perf_counter()
+        for coordinate in self._required_terrain_chunks(self._wanted_chunks):
+            self.runtime.get_or_generate(coordinate)
+        self._generation_seconds += time.perf_counter() - generation_started
+        self._terrain_queue.clear()
+        if self.context is None or self.program is None:
+            self._mesh_queue.clear()
+            self._visible = ()
+            self.loading = False
+            return
+        for coordinate in self._wanted_chunks:
+            self.runtime.activate(coordinate)
+            key = self._mesh_key(coordinate)
+            cached = self._gpu_chunks.get(coordinate)
+            if cached is not None and cached.key == key:
+                continue
+            mesh_started = time.perf_counter()
+            mesh = self._capture_mesh_snapshot(coordinate).build()
+            self._mesh_seconds += time.perf_counter() - mesh_started
+            self._install_gpu_mesh(key=key, mesh=mesh)
+        self._mesh_queue.clear()
+        self._visible = self._wanted_chunks
+        self.loading = False
+
+    def _pump_streaming(self) -> None:
+        self._collect_mesh_results()
+        if self._terrain_queue:
+            generation_started = time.perf_counter()
+            coordinate = self._terrain_queue.popleft()
+            self.runtime.get_or_generate(coordinate)
+            self._generation_seconds += time.perf_counter() - generation_started
+        for coordinate in self._wanted_chunks:
+            if not self.runtime.contains(coordinate):
+                continue
             state = self.runtime.metadata_at(coordinate).state
             if state in (ChunkState.READY, ChunkState.SUSPENDED):
                 self.runtime.activate(coordinate)
-            if self.context is not None:
-                revisions = self._neighbour_revisions(coordinate)
-                key = mesh_cache_key(terrain=terrain, neighbour_revisions=revisions)
-                cached = self._gpu_chunks.get(coordinate)
-                if cached is None or cached.key != key:
-                    if cached is not None:
-                        cached.release()
-                    mesh_start = time.perf_counter()
-                    mesh = build_chunk_mesh(
-                        terrain=terrain,
-                        column_at_world=self._column_at,
-                        block_at_world=self.editable_world.material_at,
-                    )
-                    self._mesh_seconds += time.perf_counter() - mesh_start
-                    opaque_buffer = self.context.buffer(mesh.opaque_vertices)
-                    opaque_array = self.context.vertex_array(
-                        self.program,
-                        [(opaque_buffer, "3f 2f 1f", "in_position", "in_uv", "in_shade")],
-                    )
-                    water_buffer = (
-                        self.context.buffer(mesh.water_vertices)
-                        if mesh.water_vertex_count
-                        else None
-                    )
-                    water_array = (
-                        self.context.vertex_array(
-                            self.program,
-                            [
-                                (
-                                    water_buffer,
-                                    "3f 2f 1f",
-                                    "in_position",
-                                    "in_uv",
-                                    "in_shade",
-                                )
-                            ],
-                        )
-                        if water_buffer is not None
-                        else None
-                    )
-                    self._gpu_chunks[coordinate] = GpuChunk(
-                        key=key,
-                        opaque_buffer=opaque_buffer,
-                        opaque_array=opaque_array,
-                        water_buffer=water_buffer,
-                        water_array=water_array,
-                        mesh=mesh,
-                    )
-        self._generation_seconds += time.perf_counter() - generation_start
-        for coordinate in self.runtime.coordinates():
-            if coordinate not in wanted_set and (
-                self.runtime.metadata_at(coordinate).state is ChunkState.ACTIVE
-            ):
-                self.runtime.suspend(coordinate)
-        for coordinate in tuple(self._gpu_chunks):
-            if coordinate not in wanted_set:
-                self._gpu_chunks.pop(coordinate).release()
-        self._visible = wanted
-        self.loading = False
-        self._stream_signature = signature
+        if self.context is None or self.program is None:
+            self._mesh_queue.clear()
+        elif not self._mesh_futures:
+            self._submit_next_mesh()
+        self._visible = tuple(
+            coordinate for coordinate in self._wanted_chunks if coordinate in self._gpu_chunks
+        )
+        pending_mesh_count = len(self._mesh_queue) + len(self._mesh_futures)
+        visible_mismatch = int(len(self._visible) != len(self._wanted_chunks))
+        gpu_available = int(self.context is not None)
+        gpu_backlog = gpu_available * (pending_mesh_count + visible_mismatch)
+        self.loading = bool(len(self._terrain_queue) + gpu_backlog)
+
+    def _submit_next_mesh(self) -> None:
+        attempts = len(self._mesh_queue)
+        for _ in range(attempts):
+            coordinate = self._mesh_queue.popleft()
+            if coordinate not in self._wanted_chunks:
+                continue
+            required = self._required_terrain_chunks((coordinate,))
+            if any(not self.runtime.contains(item) for item in required):
+                self._mesh_queue.append(coordinate)
+                continue
+            key = self._mesh_key(coordinate)
+            cached = self._gpu_chunks.get(coordinate)
+            if cached is not None and cached.key == key:
+                continue
+            snapshot = self._capture_mesh_snapshot(coordinate)
+            future = self._mesh_executor.submit(snapshot.build)
+            self._mesh_futures[coordinate] = (key, future)
+            return
+
+    def _collect_mesh_results(self) -> None:
+        completed = tuple(
+            coordinate for coordinate, (_, future) in self._mesh_futures.items() if future.done()
+        )
+        for coordinate in completed:
+            key, future = self._mesh_futures.pop(coordinate)
+            mesh_started = time.perf_counter()
+            mesh = future.result()
+            self._mesh_seconds += time.perf_counter() - mesh_started
+            if coordinate not in self._wanted_chunks:
+                continue
+            if key != self._mesh_key(coordinate):
+                self._mesh_queue.append(coordinate)
+                continue
+            self._install_gpu_mesh(key=key, mesh=mesh)
+
+    def _mesh_key(
+        self, coordinate: ChunkCoordinate
+    ) -> tuple[ChunkCoordinate, int, tuple[int, int, int, int], str, int, int]:
+        terrain = self.runtime.terrain_at(coordinate)
+        return mesh_cache_key(
+            terrain=terrain,
+            neighbour_revisions=self._neighbour_revisions(coordinate),
+            edit_revision=self._local_edit_revision(coordinate),
+        )
+
+    def _local_edit_revision(self, coordinate: ChunkCoordinate) -> int:
+        chunks = tuple(
+            ChunkCoordinate(x=coordinate.x + offset_x, y=coordinate.y + offset_z)
+            for offset_z in (-1, 0, 1)
+            for offset_x in (-1, 0, 1)
+        )
+        return max(
+            (edit.revision for chunk in chunks for edit in self.edits.edits_for_chunk(chunk)),
+            default=0,
+        )
+
+    def _capture_mesh_snapshot(self, coordinate: ChunkCoordinate) -> ChunkMeshSnapshot:
+        terrain = self.runtime.terrain_at(coordinate)
+        origin = coordinate.to_world_origin()
+        minimum_x = origin.x - 1
+        maximum_x = origin.x + CHUNK_SIZE
+        minimum_z = origin.y - 1
+        maximum_z = origin.y + CHUNK_SIZE
+        columns = {
+            (world_x, world_z): self._column_at(world_x, world_z)
+            for world_z in range(minimum_z, maximum_z + 1)
+            for world_x in range(minimum_x, maximum_x + 1)
+        }
+        edits = {
+            edit.coordinate: edit.material
+            for edit in self.edits.snapshot().edits
+            if minimum_x <= edit.coordinate.x <= maximum_x
+            and minimum_z <= edit.coordinate.z <= maximum_z
+        }
+        natural_blocks = (
+            natural_blocks_in_area(
+                minimum_x=minimum_x,
+                maximum_x=maximum_x,
+                minimum_z=minimum_z,
+                maximum_z=maximum_z,
+                column_at=self._column_at,
+                terrain_seed_at=self._terrain_seed_at,
+            )
+            if edits
+            else {}
+        )
+        return ChunkMeshSnapshot(
+            terrain=terrain,
+            columns=columns,
+            edits=edits,
+            natural_blocks=natural_blocks,
+            editable=bool(edits),
+        )
+
+    def _install_gpu_mesh(
+        self,
+        *,
+        key: tuple[ChunkCoordinate, int, tuple[int, int, int, int], str, int, int],
+        mesh: VoxelChunkMesh,
+    ) -> None:
+        if self.context is None or self.program is None:
+            return
+        cached = self._gpu_chunks.pop(mesh.coordinate, None)
+        if cached is not None:
+            cached.release()
+        opaque_buffer = self.context.buffer(mesh.opaque_vertices)
+        opaque_array = self.context.vertex_array(
+            self.program,
+            [(opaque_buffer, "3f 2f 1f", "in_position", "in_uv", "in_shade")],
+        )
+        water_buffer = self.context.buffer(mesh.water_vertices) if mesh.water_vertex_count else None
+        water_array = (
+            self.context.vertex_array(
+                self.program,
+                [(water_buffer, "3f 2f 1f", "in_position", "in_uv", "in_shade")],
+            )
+            if water_buffer is not None
+            else None
+        )
+        self._gpu_chunks[mesh.coordinate] = GpuChunk(
+            key=key,
+            opaque_buffer=opaque_buffer,
+            opaque_array=opaque_array,
+            water_buffer=water_buffer,
+            water_array=water_array,
+            mesh=mesh,
+        )
 
     def _column_at(self, world_x: int, world_z: int) -> BlockColumn:
         coordinate = ChunkCoordinate(x=world_x // CHUNK_SIZE, y=world_z // CHUNK_SIZE)
@@ -1517,6 +1739,37 @@ class VoxelPrototypeApplication:
         tile = terrain.tile_at(LocalTileCoordinate(x=world_x % CHUNK_SIZE, y=world_z % CHUNK_SIZE))
         return column_from_terrain(
             terrain_type=tile.terrain_type, elevation_metres=tile.elevation.metres
+        )
+
+    def _terrain_seed_at(self, world_x: int, world_z: int) -> int:
+        coordinate = ChunkCoordinate(x=world_x // CHUNK_SIZE, y=world_z // CHUNK_SIZE)
+        return self.runtime.get_or_generate(coordinate).terrain_seed
+
+    def _natural_blocks_for_chunk(
+        self, coordinate: ChunkCoordinate
+    ) -> dict[WorldBlockCoordinate, BlockMaterial]:
+        cached = self._natural_chunk_cache.get(coordinate)
+        if cached is not None:
+            return cached
+        required = self._required_terrain_chunks((coordinate,))
+        if any(not self.runtime.contains(item) for item in required):
+            return {}
+        origin = coordinate.to_world_origin()
+        blocks = natural_blocks_in_area(
+            minimum_x=origin.x,
+            maximum_x=origin.x + CHUNK_SIZE - 1,
+            minimum_z=origin.y,
+            maximum_z=origin.y + CHUNK_SIZE - 1,
+            column_at=self._column_at,
+            terrain_seed_at=self._terrain_seed_at,
+        )
+        self._natural_chunk_cache[coordinate] = blocks
+        return blocks
+
+    def _natural_material_at(self, world_x: int, world_y: int, world_z: int) -> BlockMaterial:
+        coordinate = WorldBlockCoordinate(x=world_x, y=world_y, z=world_z)
+        return self._natural_blocks_for_chunk(coordinate.chunk_coordinate).get(
+            coordinate, BlockMaterial.AIR
         )
 
     def _height_at(self, world_x: int, world_z: int) -> int:
@@ -1587,12 +1840,8 @@ class VoxelPrototypeApplication:
         self._feedback_coordinate = outcome.coordinate
         self._feedback_until = pygame.time.get_ticks() / 1000.0 + 0.22
         self.dirty = True
-        for coordinate in outcome.invalidated_chunks:
-            cached = self._gpu_chunks.pop(coordinate, None)
-            if cached is not None:
-                cached.release()
         self._stream_signature = None
-        self._stream()
+        self._stream(blocking=False)
         self.target = ray_cast(
             origin=(self.player.x, self.player.y + 1.62, self.player.z),
             direction=self.camera.forward,
@@ -1755,9 +2004,11 @@ class VoxelPrototypeApplication:
         self._mining_held = False
         self.mining.reset()
         self._drop_render_revision = -1
+        self._natural_chunk_cache.clear()
         self.editable_world = EditableVoxelWorld(
             column_at=self._column_at,
             edits=self.edits,
+            natural_material_at=self._natural_material_at,
         )
         self.interactions = VoxelInteractionController(
             world=self.editable_world,
@@ -1769,10 +2020,8 @@ class VoxelPrototypeApplication:
         affected = {
             chunk for coordinate in changed for chunk in invalidated_chunks_for_edit(coordinate)
         }
-        for coordinate in affected:
-            cached = self._gpu_chunks.pop(coordinate, None)
-            if cached is not None:
-                cached.release()
+        if affected:
+            self._stream_signature = None
         if self._player_intersects_world():
             self.player = PlayerState(
                 x=float(self.spawn_x) + 0.5,
@@ -1785,7 +2034,7 @@ class VoxelPrototypeApplication:
                 grounded=True,
             )
         self._stream_signature = None
-        self._stream()
+        self._stream(blocking=False)
         self.target = ray_cast(
             origin=(self.player.x, self.player.y + 1.62, self.player.z),
             direction=self.camera.forward,
@@ -1908,6 +2157,7 @@ class VoxelPrototypeApplication:
         status = " | loading" if self.loading else ""
         mode = "FLY" if self.player.flying else "WALK"
         input_state = "PLAY" if self.mouse_captured else "CURSOR"
+        timing = self.frame_timing.snapshot
         basic = f"Open World RPG Voxel | {self.fps:4.0f} FPS | {mode} | {input_state}{status}"
         if self.show_help:
             basic += " | F1 controls | Esc releases mouse"
@@ -1924,6 +2174,8 @@ class VoxelPrototypeApplication:
             f"{basic} | xyz {self.player.x:.1f},{self.player.y:.1f},{self.player.z:.1f}"
             f" | chunk {chunk.x},{chunk.y} | cached {len(self.runtime.coordinates())}"
             f" | meshes {len(self._gpu_chunks)} | triangles {triangles}"
+            f" | 1% low {timing.one_percent_low_fps:.0f}"
+            f" | worst {timing.worst_frame_ms:.0f}ms"
             f" | target {target}"
         )
 
@@ -2038,6 +2290,20 @@ class VoxelPrototypeApplication:
                     f"Active/cached {hud.active_chunks}/{hud.cached_chunks}",
                     f"Meshes {hud.mesh_count}  Triangles {hud.triangles}",
                     f"Mode {hud.mode}  Radius {hud.render_distance}",
+                    (
+                        f"Frame avg {self.frame_timing.snapshot.average_fps:.1f} FPS  "
+                        f"1% low {self.frame_timing.snapshot.one_percent_low_fps:.1f} FPS"
+                    ),
+                    (
+                        f"Frame p95 {self.frame_timing.snapshot.p95_frame_ms:.1f} ms  "
+                        f"worst {self.frame_timing.snapshot.worst_frame_ms:.1f} ms  "
+                        f"stalls {self.frame_timing.snapshot.stall_count}/"
+                        f"{self.frame_timing.snapshot.severe_stall_count}"
+                    ),
+                    (
+                        f"Stream terrain {len(self._terrain_queue)}  "
+                        f"meshes {len(self._mesh_queue)}  jobs {len(self._mesh_futures)}"
+                    ),
                     f"Selected {hud.selected_material.value if hud.selected_material else 'empty'}",
                     f"Target {hud.target or 'none'} "
                     f"{hud.target_material.value if hud.target_material else ''} "

@@ -8,6 +8,7 @@ import pytest
 
 from open_world_rpg.gameplay import ItemType, PlayerInventory
 from open_world_rpg.ui.voxel import (
+    MAX_EDITABLE_BLOCK_Y,
     BlockColumn,
     BlockType,
     EditableVoxelWorld,
@@ -72,6 +73,14 @@ def test_editable_world_resolution_and_override_precedence() -> None:
     assert world.material_at(0, 0, 0) is BlockMaterial.STONE
     assert world.material_at(0, 5, 0) is BlockMaterial.WATER
     assert world.material_at(0, 7, 0) is BlockMaterial.AIR
+    natural = EditableVoxelWorld(
+        column_at=column_at,
+        edits=BlockEditStore(),
+        natural_material_at=lambda x, y, z: (
+            BlockMaterial.WOOD if (x, y, z) == (0, 7, 0) else BlockMaterial.AIR
+        ),
+    )
+    assert natural.material_at(0, 7, 0) is BlockMaterial.WOOD
     coordinate = WorldBlockCoordinate(x=0, y=4, z=0)
     edits.set_block(coordinate, BlockMaterial.SNOW)
     assert world.block_at(coordinate) is BlockMaterial.SNOW
@@ -79,12 +88,19 @@ def test_editable_world_resolution_and_override_precedence() -> None:
     edits.set_block(coordinate, BlockMaterial.AIR)
     assert not world.solid_at(0, 4, 0)
     assert world.supports(WorldBlockCoordinate(x=0, y=0, z=0))
-    assert world.supports(WorldBlockCoordinate(x=0, y=64, z=0))
+    assert world.supports(WorldBlockCoordinate(x=0, y=80, z=0))
+    assert not world.supports(WorldBlockCoordinate(x=0, y=81, z=0))
     assert not world.supports(WorldBlockCoordinate(x=0, y=-1, z=0))
     with pytest.raises(TypeError):
         EditableVoxelWorld(column_at=cast(Any, None), edits=edits)
     with pytest.raises(TypeError):
         EditableVoxelWorld(column_at=column_at, edits=cast(Any, object()))
+    with pytest.raises(TypeError):
+        EditableVoxelWorld(
+            column_at=column_at,
+            edits=edits,
+            natural_material_at=cast(Any, object()),
+        )
     with pytest.raises(TypeError):
         world.block_at(cast(Any, (0, 0, 0)))
     with pytest.raises(TypeError):
@@ -230,7 +246,11 @@ def test_placement_validation_and_success() -> None:
         is InteractionResult.OCCUPIED
     )
     outside = hit(
-        coordinate=WorldBlockCoordinate(x=0, y=64, z=0),
+        coordinate=WorldBlockCoordinate(
+            x=0,
+            y=MAX_EDITABLE_BLOCK_Y,
+            z=0,
+        ),
         normal=(0, 1, 0),
     )
     assert (

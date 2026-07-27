@@ -18,6 +18,7 @@ from open_world_rpg.gameplay import (
     ToolInstance,
     ToolTier,
     hardness_microseconds,
+    item_for_material,
     item_policy,
     material_for_item,
     mining_duration_microseconds,
@@ -48,6 +49,8 @@ def test_catalogue_centralises_block_and_tool_policy() -> None:
         item_policy("wooden_pickaxe")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         material_for_item(ItemType.WOODEN_PICKAXE)
+    assert item_for_material(BlockMaterial.WOOD) is ItemType.WOOD_LOG
+    assert item_for_material(BlockMaterial.LEAVES) is None
     with pytest.raises(ValueError):
         ItemStack(item=ItemType.WOODEN_SHOVEL, quantity=1)
 
@@ -152,6 +155,8 @@ def test_mining_policy_known_hardness_and_effectiveness() -> None:
             BlockMaterial.SAND,
             BlockMaterial.DIRT,
             BlockMaterial.GRASS,
+            BlockMaterial.WOOD,
+            BlockMaterial.LEAVES,
             BlockMaterial.STONE,
         )
     } == {
@@ -159,6 +164,8 @@ def test_mining_policy_known_hardness_and_effectiveness() -> None:
         BlockMaterial.SAND: 450_000,
         BlockMaterial.DIRT: 550_000,
         BlockMaterial.GRASS: 650_000,
+        BlockMaterial.WOOD: 900_000,
+        BlockMaterial.LEAVES: 180_000,
         BlockMaterial.STONE: 2_000_000,
     }
     assert hardness_microseconds(BlockMaterial.AIR) is None

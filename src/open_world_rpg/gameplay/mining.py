@@ -17,6 +17,8 @@ _HARDNESS_MICROSECONDS: Final = {
     BlockMaterial.SAND: 450_000,
     BlockMaterial.DIRT: 550_000,
     BlockMaterial.GRASS: 650_000,
+    BlockMaterial.WOOD: 900_000,
+    BlockMaterial.LEAVES: 180_000,
     BlockMaterial.STONE: 2_000_000,
 }
 _SHOVEL_MATERIALS: Final = frozenset(

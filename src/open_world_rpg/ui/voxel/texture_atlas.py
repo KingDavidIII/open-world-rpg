@@ -7,13 +7,13 @@ from enum import StrEnum
 from typing import Final
 
 ATLAS_TILE_SIZE: Final = 16
-ATLAS_COLUMNS: Final = 3
-ATLAS_ROWS: Final = 3
+ATLAS_COLUMNS: Final = 4
+ATLAS_ROWS: Final = 4
 ATLAS_SIZE: Final = ATLAS_TILE_SIZE * ATLAS_COLUMNS
 
 
 class FaceTexture(StrEnum):
-    """Nine stable atlas cells for terrain face roles."""
+    """Stable atlas cells for terrain and natural block face roles."""
 
     GRASS_TOP = "grass_top"
     GRASS_SIDE = "grass_side"
@@ -24,6 +24,9 @@ class FaceTexture(StrEnum):
     SNOW_SIDE = "snow_side"
     DEEP_WATER = "deep_water"
     SHALLOW_WATER = "shallow_water"
+    LOG_TOP = "log_top"
+    LOG_SIDE = "log_side"
+    LEAVES = "leaves"
 
 
 _BASES: Final[dict[FaceTexture, tuple[int, int, int, int]]] = {
@@ -36,6 +39,9 @@ _BASES: Final[dict[FaceTexture, tuple[int, int, int, int]]] = {
     FaceTexture.SNOW_SIDE: (188, 207, 215, 255),
     FaceTexture.DEEP_WATER: (25, 74, 128, 180),
     FaceTexture.SHALLOW_WATER: (39, 137, 171, 168),
+    FaceTexture.LOG_TOP: (151, 113, 67, 255),
+    FaceTexture.LOG_SIDE: (109, 75, 43, 255),
+    FaceTexture.LEAVES: (54, 125, 47, 255),
 }
 
 
@@ -60,6 +66,13 @@ def generate_texture_atlas() -> bytes:
                     red, green, blue = _BASES[FaceTexture.GRASS_TOP][:3]
                 elif texture is FaceTexture.SNOW_SIDE and y < 3 + (noise % 2):
                     red, green, blue = _BASES[FaceTexture.SNOW_TOP][:3]
+                elif texture is FaceTexture.LOG_TOP:
+                    ring = max(abs(x - 7.5), abs(y - 7.5))
+                    delta += 14 if int(ring) % 3 == 0 else -4
+                elif texture is FaceTexture.LOG_SIDE:
+                    delta += 13 if (x + noise % 3) % 5 == 0 else -3
+                elif texture is FaceTexture.LEAVES:
+                    delta += 16 if (x * 3 + y * 5 + noise) % 9 == 0 else -5
                 elif (
                     texture in (FaceTexture.DEEP_WATER, FaceTexture.SHALLOW_WATER)
                     and (x + y + noise) % 11 == 0

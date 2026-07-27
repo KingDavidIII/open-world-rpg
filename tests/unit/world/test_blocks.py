@@ -24,6 +24,8 @@ def test_block_material_values_and_solidity_are_stable() -> None:
         "stone",
         "sand",
         "snow",
+        "wood",
+        "leaves",
         "water",
     )
     assert not BlockMaterial.AIR.is_solid

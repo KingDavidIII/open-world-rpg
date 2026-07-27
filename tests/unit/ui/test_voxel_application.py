@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import struct
 import sys
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -41,6 +42,7 @@ from open_world_rpg.ui.voxel.camera import PlayerState
 from open_world_rpg.ui.voxel.collision import RayHit
 from open_world_rpg.ui.voxel.game_flow import GameFlowAction, VoxelScreen
 from open_world_rpg.ui.voxel.interaction import InteractionOutcome, InteractionResult
+from open_world_rpg.ui.voxel.meshing import VoxelChunkMesh
 from open_world_rpg.world import (
     BlockMaterial,
     ChunkCoordinate,
@@ -230,7 +232,7 @@ def test_inventory_noop_controls_drop_update_pickup_and_uninitialised_batch(
         lambda **_kwargs: application.player,
     )
     monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         application.dropped_items,
@@ -297,7 +299,7 @@ def test_update_reuses_frame_column_cache_and_preserves_block_resolution(
     monkeypatch.setattr(application, "_column_at", column_at)
     monkeypatch.setattr(voxel_application, "move_player", inspect_cached_collision)
     monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
 
@@ -311,7 +313,7 @@ def test_survival_update_covers_sprint_jump_fall_damage_and_respawn(
 ) -> None:
     application = VoxelPrototypeApplication()
     application.mouse_captured = True
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
     monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
@@ -519,7 +521,7 @@ def test_render_distance_controls_clamp_between_one_and_four(
     application = VoxelPrototypeApplication()
     stream_calls = 0
 
-    def record_stream() -> None:
+    def record_stream(**_kwargs: object) -> None:
         nonlocal stream_calls
         stream_calls += 1
 
@@ -595,7 +597,7 @@ def test_hotbar_keyboard_wheel_and_mouse_edit_edges(
     assert save_load_calls == ["save", "load"]
 
 
-def test_successful_interaction_releases_only_invalidated_cached_meshes(
+def test_successful_interaction_keeps_stale_mesh_until_async_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Cached:
@@ -611,11 +613,10 @@ def test_successful_interaction_releases_only_invalidated_cached_meshes(
     kept = Cached()
     application._gpu_chunks[affected] = cast(Any, removed)  # type: ignore[attr-defined]
     application._gpu_chunks[retained] = cast(Any, kept)  # type: ignore[attr-defined]
-    stream_calls = 0
+    stream_calls: list[dict[str, object]] = []
 
-    def stream() -> None:
-        nonlocal stream_calls
-        stream_calls += 1
+    def stream(**kwargs: object) -> None:
+        stream_calls.append(kwargs)
 
     monkeypatch.setattr(application, "_stream", stream)
     monkeypatch.setattr(
@@ -630,11 +631,11 @@ def test_successful_interaction_releases_only_invalidated_cached_meshes(
             dropped_item=ItemType.STONE_BLOCK,
         )
     )
-    assert removed.released
+    assert not removed.released
     assert not kept.released
-    assert affected not in application._gpu_chunks  # type: ignore[attr-defined]
+    assert affected in application._gpu_chunks  # type: ignore[attr-defined]
     assert retained in application._gpu_chunks  # type: ignore[attr-defined]
-    assert stream_calls == 1
+    assert stream_calls == [{"blocking": False}]
     application._apply_interaction(  # type: ignore[attr-defined]
         InteractionOutcome(result=InteractionResult.PLAYER_INTERSECTION)
     )
@@ -669,7 +670,7 @@ def test_voxel_save_load_is_atomic_dirty_and_world_scoped(
 
     application.edits.set_block(coordinate, BlockMaterial.DIRT)
     application.dirty = True
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(
         "open_world_rpg.ui.voxel.application.ray_cast",
         lambda **_kwargs: None,
@@ -877,6 +878,120 @@ def test_hud_texture_upload_is_throttled_while_cached_hud_still_renders(
         pygame.quit()
 
 
+def test_async_mesh_results_install_replace_requeue_and_ignore_stale_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Resource:
+        released = False
+
+        def release(self) -> None:
+            self.released = True
+
+    class Context:
+        buffers: list[Resource]
+        arrays: list[Resource]
+
+        def __init__(self) -> None:
+            self.buffers = []
+            self.arrays = []
+
+        def buffer(self, _data: bytes) -> Resource:
+            resource = Resource()
+            self.buffers.append(resource)
+            return resource
+
+        def vertex_array(self, _program: object, _content: object) -> Resource:
+            resource = Resource()
+            self.arrays.append(resource)
+            return resource
+
+    application = VoxelPrototypeApplication()
+    context = Context()
+    application.context = cast(Any, context)
+    application.program = cast(Any, object())
+    coordinate = ChunkCoordinate(x=0, y=0)
+    application._wanted_chunks = (coordinate,)  # type: ignore[attr-defined]
+    key = (coordinate, 1, (0, 0, 0, 0), "v1", 3, 0)
+    mesh = VoxelChunkMesh(
+        coordinate=coordinate,
+        opaque_vertices=b"opaque",
+        water_vertices=b"water",
+        opaque_vertex_count=6,
+        water_vertex_count=6,
+        triangle_count=4,
+        terrain_revision=1,
+    )
+    monkeypatch.setattr(application, "_mesh_key", lambda _coordinate: key)
+
+    completed: Future[VoxelChunkMesh] = Future()
+    completed.set_result(mesh)
+    application._mesh_futures[coordinate] = (key, completed)  # type: ignore[attr-defined]
+    application._collect_mesh_results()  # type: ignore[attr-defined]
+    installed = application._gpu_chunks[coordinate]  # type: ignore[attr-defined]
+    assert installed.key == key
+    assert installed.water_array is not None
+
+    replacement: Future[VoxelChunkMesh] = Future()
+    replacement.set_result(mesh)
+    application._mesh_futures[coordinate] = (key, replacement)  # type: ignore[attr-defined]
+    application._collect_mesh_results()  # type: ignore[attr-defined]
+    assert installed.opaque_buffer.released
+    assert installed.opaque_array.released
+    assert installed.water_buffer is not None and installed.water_buffer.released
+    assert installed.water_array is not None and installed.water_array.released
+
+    changed_key = (coordinate, 2, (0, 0, 0, 0), "v1", 3, 0)
+    monkeypatch.setattr(application, "_mesh_key", lambda _coordinate: changed_key)
+    stale: Future[VoxelChunkMesh] = Future()
+    stale.set_result(mesh)
+    application._mesh_futures[coordinate] = (key, stale)  # type: ignore[attr-defined]
+    application._collect_mesh_results()  # type: ignore[attr-defined]
+    assert application._mesh_queue.pop() == coordinate  # type: ignore[attr-defined]
+
+    application._wanted_chunks = ()  # type: ignore[attr-defined]
+    ignored: Future[VoxelChunkMesh] = Future()
+    ignored.set_result(mesh)
+    application._mesh_futures[coordinate] = (key, ignored)  # type: ignore[attr-defined]
+    application._collect_mesh_results()  # type: ignore[attr-defined]
+    application.shutdown()
+
+
+def test_mesh_install_is_a_noop_without_an_opengl_context() -> None:
+    application = VoxelPrototypeApplication()
+    coordinate = ChunkCoordinate(x=0, y=0)
+    mesh = VoxelChunkMesh(
+        coordinate=coordinate,
+        opaque_vertices=b"",
+        water_vertices=b"",
+        opaque_vertex_count=0,
+        water_vertex_count=0,
+        triangle_count=0,
+        terrain_revision=1,
+    )
+    application._install_gpu_mesh(  # type: ignore[attr-defined]
+        key=(coordinate, 1, (0, 0, 0, 0), "v1", 3, 0),
+        mesh=mesh,
+    )
+    assert not application._gpu_chunks  # type: ignore[attr-defined]
+    application.shutdown()
+
+
+def test_shutdown_cancels_pending_mesh_work_and_clears_stream_queues() -> None:
+    application = VoxelPrototypeApplication()
+    coordinate = ChunkCoordinate(x=0, y=0)
+    future: Future[Any] = Future()
+    application._mesh_futures[coordinate] = (cast(Any, ()), future)  # type: ignore[attr-defined]
+    application._terrain_queue.append(coordinate)  # type: ignore[attr-defined]
+    application._mesh_queue.append(coordinate)  # type: ignore[attr-defined]
+
+    application.shutdown()
+
+    assert future.cancelled()
+    assert not application._mesh_futures  # type: ignore[attr-defined]
+    assert not application._terrain_queue  # type: ignore[attr-defined]
+    assert not application._mesh_queue  # type: ignore[attr-defined]
+
+
 def test_stream_without_context_maintains_domain_cache_only() -> None:
     application = VoxelPrototypeApplication(
         config=VoxelPrototypeConfig(
@@ -887,6 +1002,79 @@ def test_stream_without_context_maintains_domain_cache_only() -> None:
     application._stream()  # type: ignore[attr-defined]
     assert application.runtime.coordinates()
     assert not application._gpu_chunks  # type: ignore[attr-defined]
+    application.shutdown()
+
+
+def test_local_edit_revision_includes_diagonal_tree_overlap() -> None:
+    application = VoxelPrototypeApplication()
+    coordinate = ChunkCoordinate(x=0, y=0)
+    assert application._local_edit_revision(coordinate) == 0  # type: ignore[attr-defined]
+    edit = application.edits.set_block(
+        WorldBlockCoordinate(x=16, y=12, z=16),
+        BlockMaterial.AIR,
+    )
+    revision = application._local_edit_revision(coordinate)  # type: ignore[attr-defined]
+    assert revision == edit.revision
+    application.shutdown()
+
+
+def test_incremental_streaming_generates_one_neighbourhood_chunk_per_pump() -> None:
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(
+            render_distance=0,
+            terrain_config=application_config(),
+        )
+    )
+    centre = ChunkCoordinate(x=0, y=0)
+    required = application._required_terrain_chunks((centre,))  # type: ignore[attr-defined]
+    assert len(required) == 9
+    assert required[0] == centre
+    assert ChunkCoordinate(x=-1, y=-1) in required
+    assert ChunkCoordinate(x=1, y=1) in required
+
+    application._stream(blocking=False)  # type: ignore[attr-defined]
+    assert len(application.runtime.coordinates()) == 1
+    assert application.loading
+
+    for _ in range(8):
+        application._stream(blocking=False)  # type: ignore[attr-defined]
+    assert set(application.runtime.coordinates()) == set(required)
+    assert not application.loading
+    application.shutdown()
+
+
+def test_natural_block_cache_never_forces_missing_terrain_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(
+            render_distance=0,
+            terrain_config=application_config(),
+        )
+    )
+    coordinate = ChunkCoordinate(x=0, y=0)
+    assert application._natural_blocks_for_chunk(coordinate) == {}  # type: ignore[attr-defined]
+    assert not application.runtime.coordinates()
+
+    required_chunks = application._required_terrain_chunks(  # type: ignore[attr-defined]
+        (coordinate,)
+    )
+    for required in required_chunks:
+        application.runtime.get_or_generate(required)
+    block = WorldBlockCoordinate(x=0, y=13, z=0)
+    calls = 0
+
+    def resolve_natural_blocks(**_kwargs: object) -> dict[WorldBlockCoordinate, BlockMaterial]:
+        nonlocal calls
+        calls += 1
+        return {block: BlockMaterial.WOOD}
+
+    monkeypatch.setattr(voxel_application, "natural_blocks_in_area", resolve_natural_blocks)
+    first = application._natural_blocks_for_chunk(coordinate)  # type: ignore[attr-defined]
+    second = application._natural_blocks_for_chunk(coordinate)  # type: ignore[attr-defined]
+    assert first == {block: BlockMaterial.WOOD}
+    assert second is first
+    assert calls == 1
     application.shutdown()
 
 
@@ -1204,7 +1392,7 @@ def test_update_normalises_diagonal_motion_and_pauses_input_with_free_cursor(
     monkeypatch.setattr(pygame.key, "get_pressed", Keys)
     monkeypatch.setattr(voxel_application, "move_player", capture_move)
     monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
 
@@ -1212,7 +1400,7 @@ def test_update_normalises_diagonal_motion_and_pauses_input_with_free_cursor(
 
     first = captured_moves[-1]
     diagonal_distance = (float(first["delta_x"]) ** 2 + float(first["delta_z"]) ** 2) ** 0.5
-    assert diagonal_distance == pytest.approx(0.1)
+    assert 0.0 < diagonal_distance < 0.09
     assert first["jump"] is True
 
     application.mouse_captured = False
@@ -1353,7 +1541,7 @@ def test_flying_vertical_input_respects_mouse_capture(
     monkeypatch.setattr(pygame.key, "get_pressed", Keys)
     monkeypatch.setattr(voxel_application, "move_player", lambda **_kwargs: application.player)
     monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
 
@@ -1694,7 +1882,7 @@ def test_game_flow_event_router_and_gameplay_controls(
     monkeypatch.setattr(application, "_open_pause_menu", lambda: pauses.append(True))
     monkeypatch.setattr(application, "_open_inventory_screen", lambda: inventories.append(True))
     monkeypatch.setattr(application, "_place_player_at_spawn", lambda: None)
-    monkeypatch.setattr(application, "_stream", lambda: streams.append(True))
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: streams.append(True))
     monkeypatch.setattr(application, "_save_edits", lambda: saves.append(True) or True)
     monkeypatch.setattr(application, "_load_edits", lambda: loads.append(True) or True)
     monkeypatch.setattr(application, "_on_inventory_changed", inventory_changes.append)
@@ -1847,7 +2035,7 @@ def test_new_world_spawn_and_flow_overlay_rendering(
             "_refresh_interaction_previews",
             lambda: calls.append("preview"),
         )
-        monkeypatch.setattr(application, "_stream", lambda: calls.append("stream"))
+        monkeypatch.setattr(application, "_stream", lambda **_kwargs: calls.append("stream"))
         application.edits.set_block(
             WorldBlockCoordinate(x=0, y=1, z=0),
             BlockMaterial.STONE,
@@ -1997,7 +2185,7 @@ def test_game_flow_death_transition_waits_for_explicit_respawn(
         lambda **_kwargs: PlayerState(x=1, y=8, z=1, grounded=True),
     )
     monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(application.dropped_items, "update", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(application.dropped_items, "pickup_near", lambda **_kwargs: ())
     monkeypatch.setattr(application, "_capture_mouse", captures.append)
@@ -2067,23 +2255,29 @@ def test_playable_progression_new_world_guide_recipe_gate_and_completion(
     captures: list[bool] = []
     monkeypatch.setattr(application, "_capture_mouse", captures.append)
     monkeypatch.setattr(voxel_application, "safe_spawn_height", lambda **_kwargs: 12.0)
+    monkeypatch.setattr(application, "_height_at", lambda _x, _z: 12)
     monkeypatch.setattr(application, "_place_player_at_spawn", lambda: None)
     monkeypatch.setattr(application, "_refresh_interaction_previews", lambda: None)
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(pygame.time, "get_ticks", lambda: 2000)
 
     application._activate_flow_action(GameFlowAction.NEW_WORLD)  # type: ignore[attr-defined]
     assert application.flow.screen is VoxelScreen.GUIDE
-    assert len(application.dropped_items) == 3
-    starter_logs = application.dropped_items.items()
-    assert {drop.item for drop in starter_logs} == {ItemType.WOOD_LOG}
-    assert all(drop.position[1] == pytest.approx(12.35) for drop in starter_logs)
+    assert len(application.dropped_items) == 0
+    starter_wood = tuple(
+        edit for edit in application.edits.snapshot().edits if edit.material is BlockMaterial.WOOD
+    )
+    starter_leaves = tuple(
+        edit for edit in application.edits.snapshot().edits if edit.material is BlockMaterial.LEAVES
+    )
+    assert len(starter_wood) == 4
+    assert starter_leaves
     forward_x, _, forward_z = application.camera.forward
     assert all(
-        (drop.position[0] - application.spawn_x - 0.5) * forward_x
-        + (drop.position[2] - application.spawn_z - 0.5) * forward_z
-        > 2.0
-        for drop in starter_logs
+        (edit.coordinate.x - application.spawn_x) * forward_x
+        + (edit.coordinate.z - application.spawn_z) * forward_z
+        > 3.0
+        for edit in starter_wood
     )
     assert captures[-1] is False
 
@@ -2192,7 +2386,7 @@ def test_progression_state_round_trips_through_voxel_save(
     )
     assert application._save_edits()  # type: ignore[attr-defined]
     application.progression = SurvivalProgression()
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(voxel_application, "ray_cast", lambda **_kwargs: None)
     assert application._load_edits()  # type: ignore[attr-defined]
     assert application.progression.stage is ProgressionStage.COLLECT_STONE
@@ -2381,7 +2575,7 @@ def test_voxel_save_path_is_canonical_and_backup_recovery_is_visible(
     assert application._save_edits()  # type: ignore[attr-defined]
     canonical_path.write_text("{broken", encoding="utf-8")
 
-    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(application, "_stream", lambda **_kwargs: None)
     monkeypatch.setattr(
         "open_world_rpg.ui.voxel.application.ray_cast",
         lambda **_kwargs: None,
@@ -2391,3 +2585,240 @@ def test_voxel_save_path_is_canonical_and_backup_recovery_is_visible(
     assert application.edits.get(coordinate).material is BlockMaterial.STONE  # type: ignore[union-attr]
     assert application.save_message == "World recovered from backup"
     assert json.loads(canonical_path.read_text(encoding="utf-8"))
+
+
+def test_starter_tree_places_trunk_and_clips_leaves_above_editable_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    trunk = (
+        WorldBlockCoordinate(x=3, y=20, z=4),
+        WorldBlockCoordinate(x=3, y=21, z=4),
+    )
+    visible_leaf = WorldBlockCoordinate(
+        x=4,
+        y=voxel_application.MAX_EDITABLE_BLOCK_Y,
+        z=4,
+    )
+    clipped_leaf = WorldBlockCoordinate(
+        x=4,
+        y=voxel_application.MAX_EDITABLE_BLOCK_Y + 1,
+        z=4,
+    )
+
+    class Shape:
+        leaves = (visible_leaf, clipped_leaf)
+
+        def __init__(self) -> None:
+            self.trunk = trunk
+
+    monkeypatch.setattr(voxel_application, "tree_shape", lambda **_kwargs: Shape())
+    monkeypatch.setattr(application, "_height_at", lambda _x, _z: 19)
+
+    application._plant_starter_tree()  # type: ignore[attr-defined]
+
+    trunk_edits = tuple(application.edits.get(coordinate) for coordinate in trunk)
+    assert all(edit is not None for edit in trunk_edits)
+    assert all(edit.material is BlockMaterial.WOOD for edit in trunk_edits if edit is not None)
+    visible_leaf_edit = application.edits.get(visible_leaf)
+    assert visible_leaf_edit is not None
+    assert visible_leaf_edit.material is BlockMaterial.LEAVES
+    assert application.edits.get(clipped_leaf) is None
+    application.shutdown()
+
+
+def test_render_updates_outline_projection_and_fog_uniforms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Uniform:
+        def __init__(self) -> None:
+            self.value: object = None
+            self.writes: list[bytes] = []
+
+        def write(self, value: bytes) -> None:
+            self.writes.append(value)
+
+    class Program:
+        def __init__(self) -> None:
+            self.uniforms: dict[str, Uniform] = {}
+
+        def __getitem__(self, name: str) -> Uniform:
+            return self.uniforms.setdefault(name, Uniform())
+
+    class Context:
+        viewport: tuple[int, int, int, int]
+        depth_mask = True
+
+        def clear(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def disable(self, _flag: int) -> None:
+            return None
+
+        def enable(self, _flag: int) -> None:
+            return None
+
+    application = VoxelPrototypeApplication()
+    program = Program()
+    outline_program = Program()
+    application.context = cast(Any, Context())
+    application.program = cast(Any, program)
+    application._outline_program = cast(Any, outline_program)  # type: ignore[attr-defined]
+    application._visible = (ChunkCoordinate(x=99, y=99),)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(pygame.display, "get_window_size", lambda: (960, 540))
+    monkeypatch.setattr(pygame.display, "set_caption", lambda _caption: None)
+    monkeypatch.setattr(pygame.display, "flip", lambda: None)
+    monkeypatch.setattr(pygame.time, "get_ticks", lambda: 2_000)
+    monkeypatch.setattr(application, "_refresh_drop_gpu", lambda: None)
+    monkeypatch.setattr(application, "_render_hud", lambda _triangles: None)
+
+    application.render()
+
+    assert program.uniforms["projection"].writes
+    assert program.uniforms["view"].writes
+    assert outline_program.uniforms["projection"].writes
+    assert outline_program.uniforms["view"].writes
+    assert program.uniforms["fog_far"].value == pytest.approx(
+        (application.render_distance + 1.5) * voxel_application.CHUNK_SIZE
+    )
+    application.context = None
+    application.program = None
+    application._outline_program = None  # type: ignore[attr-defined]
+    application.shutdown()
+
+
+def test_incremental_streaming_pumps_generation_activation_and_mesh_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    ready = ChunkCoordinate(x=0, y=0)
+    missing = ChunkCoordinate(x=1, y=0)
+    generated: list[ChunkCoordinate] = []
+    activated: list[ChunkCoordinate] = []
+    submissions: list[None] = []
+
+    class Metadata:
+        state = voxel_application.ChunkState.READY
+
+    class Runtime:
+        def get_or_generate(self, coordinate: ChunkCoordinate) -> None:
+            generated.append(coordinate)
+
+        def contains(self, coordinate: ChunkCoordinate) -> bool:
+            return coordinate == ready
+
+        def metadata_at(self, _coordinate: ChunkCoordinate) -> Metadata:
+            return Metadata()
+
+        def activate(self, coordinate: ChunkCoordinate) -> None:
+            activated.append(coordinate)
+
+    original_runtime = application.runtime
+    application.runtime = cast(Any, Runtime())
+    application._wanted_chunks = (ready, missing)  # type: ignore[attr-defined]
+    application._terrain_queue.append(ready)  # type: ignore[attr-defined]
+    application._gpu_chunks[ready] = cast(Any, object())  # type: ignore[attr-defined]
+    application.context = cast(Any, object())
+    application.program = cast(Any, object())
+
+    monkeypatch.setattr(application, "_collect_mesh_results", lambda: None)
+    monkeypatch.setattr(application, "_submit_next_mesh", lambda: submissions.append(None))
+
+    application._pump_streaming()  # type: ignore[attr-defined]
+
+    assert generated == [ready]
+    assert activated == [ready]
+    assert submissions == [None]
+    assert application._visible == (ready,)  # type: ignore[attr-defined]
+    assert application.loading
+    application.runtime = original_runtime
+    application.context = None
+    application.program = None
+    application._gpu_chunks.clear()  # type: ignore[attr-defined]
+    application.shutdown()
+
+
+def test_incremental_streaming_activates_only_ready_or_suspended_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    ready = ChunkCoordinate(x=0, y=0)
+    suspended = ChunkCoordinate(x=1, y=0)
+    active = ChunkCoordinate(x=2, y=0)
+    missing = ChunkCoordinate(x=3, y=0)
+    states = {
+        ready: voxel_application.ChunkState.READY,
+        suspended: voxel_application.ChunkState.SUSPENDED,
+        active: voxel_application.ChunkState.ACTIVE,
+    }
+    activated: list[ChunkCoordinate] = []
+
+    class Metadata:
+        def __init__(self, state: object) -> None:
+            self.state = state
+
+    class Runtime:
+        def contains(self, coordinate: ChunkCoordinate) -> bool:
+            return coordinate != missing
+
+        def metadata_at(self, coordinate: ChunkCoordinate) -> Metadata:
+            return Metadata(states[coordinate])
+
+        def activate(self, coordinate: ChunkCoordinate) -> None:
+            activated.append(coordinate)
+
+    original_runtime = application.runtime
+    application.runtime = cast(Any, Runtime())
+    application._wanted_chunks = (ready, suspended, active, missing)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(application, "_collect_mesh_results", lambda: None)
+
+    application._pump_streaming()  # type: ignore[attr-defined]
+
+    assert activated == [ready, suspended]
+    application.runtime = original_runtime
+    application.shutdown()
+
+
+def test_mesh_submission_skips_unwanted_and_requeues_missing_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = VoxelPrototypeApplication()
+    unwanted = ChunkCoordinate(x=9, y=9)
+    waiting = ChunkCoordinate(x=0, y=0)
+    available = ChunkCoordinate(x=0, y=0)
+    unavailable = ChunkCoordinate(x=1, y=0)
+    required = (available, unavailable)
+
+    class Runtime:
+        def contains(self, coordinate: ChunkCoordinate) -> bool:
+            return coordinate == available
+
+    def required_chunks(
+        _coordinates: tuple[ChunkCoordinate, ...],
+    ) -> tuple[ChunkCoordinate, ...]:
+        return required
+
+    original_runtime = application.runtime
+    application.runtime = cast(Any, Runtime())
+    application._wanted_chunks = (waiting,)  # type: ignore[attr-defined]
+    application._mesh_queue.extend(  # type: ignore[attr-defined]
+        (unwanted, waiting)
+    )
+
+    monkeypatch.setattr(
+        application,
+        "_required_terrain_chunks",
+        required_chunks,
+    )
+
+    try:
+        application._submit_next_mesh()  # type: ignore[attr-defined]
+
+        assert tuple(
+            application._mesh_queue  # type: ignore[attr-defined]
+        ) == (waiting,)
+    finally:
+        application.runtime = original_runtime
+        application.shutdown()

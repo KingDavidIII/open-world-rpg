@@ -54,6 +54,8 @@ def test_voxel_demo_builds_uploads_and_draws_bounded_frame() -> None:
             pytest.skip(str(error))
         assert application.runtime.coordinates()
         assert application.runtime.service.snapshot().successful_generations > 0
+        assert application.frame_timing.snapshot.sample_count == 2
+        assert application.fps > 0
         assert application.context is None
     finally:
         application.shutdown()
@@ -165,6 +167,7 @@ def test_voxel_controls_targeting_and_shutdown_cleanup(
             existing.key[2],
             existing.key[3],
             existing.key[4],
+            existing.key[5],
         )
         application._stream_signature = None  # type: ignore[attr-defined]
         application._stream()  # type: ignore[attr-defined]
@@ -212,7 +215,7 @@ def test_spawn_generation_failure_is_wrapped_and_cleans_up(
         )
     )
 
-    def fail_stream() -> None:
+    def fail_stream(**_kwargs: object) -> None:
         raise RuntimeError("generation failed")
 
     monkeypatch.setattr(application, "_stream", fail_stream)
