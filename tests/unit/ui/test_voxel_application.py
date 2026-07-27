@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import struct
+import sys
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -82,6 +83,33 @@ def test_run_validates_bounded_frame_count() -> None:
     application._render_target_outline(  # type: ignore[attr-defined]
         RayHit(x=0, y=0, z=0, distance=0.0)
     )
+    for field_name in (
+        "width_pixels",
+        "height_pixels",
+        "target_fps",
+        "render_distance",
+        "world_seed",
+    ):
+        with pytest.raises(TypeError, match=field_name):
+            VoxelPrototypeConfig(**{field_name: True})  # type: ignore[arg-type]
+    for field_name, value in (
+        ("width_pixels", 159),
+        ("width_pixels", 7681),
+        ("height_pixels", 89),
+        ("height_pixels", 4321),
+        ("target_fps", 0),
+        ("target_fps", 361),
+        ("render_distance", -1),
+        ("render_distance", 9),
+        ("world_seed", -1),
+        ("world_seed", 1 << 63),
+    ):
+        with pytest.raises(ValueError, match=field_name):
+            VoxelPrototypeConfig(**{field_name: value})  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="hidden_window"):
+        VoxelPrototypeConfig(hidden_window=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="terrain_config"):
+        VoxelPrototypeConfig(terrain_config=cast(Any, object()))
     with pytest.raises(TypeError):
         VoxelPrototypeConfig(interaction_reach=True)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
@@ -94,6 +122,8 @@ def test_run_validates_bounded_frame_count() -> None:
         VoxelPrototypeConfig(placement_cooldown=-1)
     with pytest.raises(TypeError):
         VoxelPrototypeConfig(save_path="save.json")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="may contain"):
+        VoxelPrototypeConfig(save_path=Path("invalid name.json"))
     with pytest.raises(TypeError):
         VoxelPrototypeConfig(load_on_start=1)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
@@ -905,9 +935,21 @@ def test_shutdown_tolerates_resource_release_failures(
     assert application.context is None
 
 
-def test_voxel_entry_point_selects_smoke_and_interactive_modes(
+def test_voxel_default_data_directory_uses_executable_when_frozen(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+) -> None:
+    executable = tmp_path / "OpenWorldRPG.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+
+    assert voxel_demo._default_data_directory() == tmp_path.resolve()  # type: ignore[attr-defined]
+
+
+def test_voxel_entry_point_selects_release_modes_and_runtime_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     calls: list[tuple[VoxelPrototypeConfig, int | None]] = []
 
@@ -920,29 +962,47 @@ def test_voxel_entry_point_selects_smoke_and_interactive_modes(
             return 0
 
     monkeypatch.setattr(voxel_demo, "VoxelPrototypeApplication", Application)
-    assert voxel_demo.main(["--smoke-test"]) == 0
+    data_dir = tmp_path / "runtime"
+    common = ["--data-dir", str(data_dir)]
+
+    assert voxel_demo.main([*common, "--smoke-test", "--smoke-frames", "5"]) == 0
     assert calls[-1][0].hidden_window
     assert not calls[-1][0].game_flow_enabled
     assert calls[-1][0].save_path is None
-    assert calls[-1][1] == 3
-    assert voxel_demo.main([]) == 0
+    assert calls[-1][1] == 5
+
+    assert voxel_demo.main(common) == 0
     assert not calls[-1][0].hidden_window
     assert calls[-1][0].game_flow_enabled
     assert calls[-1][0].progression_enabled
-    assert calls[-1][0].save_path == Path("saves/voxel.json")
+    assert calls[-1][0].save_path == (data_dir / "saves" / "voxel.json").resolve()
     assert calls[-1][1] is None
-    assert voxel_demo.main(["--direct-play"]) == 0
+    assert (data_dir / "logs" / "open-world-rpg.log").is_file()
+
+    assert voxel_demo.main([*common, "--direct-play"]) == 0
     assert not calls[-1][0].game_flow_enabled
     assert not calls[-1][0].progression_enabled
-    save_path = tmp_path / "voxel.json"
+
+    save_path = tmp_path / "Custom_Save.json"
     assert (
         voxel_demo.main(
             [
+                *common,
                 "--smoke-test",
                 "--save-path",
                 str(save_path),
                 "--load",
                 "--autosave",
+                "--width",
+                "640",
+                "--height",
+                "360",
+                "--target-fps",
+                "90",
+                "--render-distance",
+                "2",
+                "--world-seed",
+                "42",
             ]
         )
         == 0
@@ -950,27 +1010,87 @@ def test_voxel_entry_point_selects_smoke_and_interactive_modes(
     assert calls[-1][0].save_path == save_path
     assert calls[-1][0].load_on_start
     assert calls[-1][0].autosave
-    assert voxel_demo.main(["--load"]) == 0
+    assert calls[-1][0].width_pixels == 640
+    assert calls[-1][0].height_pixels == 360
+    assert calls[-1][0].target_fps == 90
+    assert calls[-1][0].render_distance == 2
+    assert calls[-1][0].world_seed == 42
+
+    assert voxel_demo.main([*common, "--load"]) == 0
     assert calls[-1][0].load_on_start
-    assert calls[-1][0].save_path == Path("saves/voxel.json")
+    assert calls[-1][0].save_path == (data_dir / "saves" / "voxel.json").resolve()
+
     with pytest.raises(SystemExit):
-        voxel_demo.main(["--smoke-test", "--load"])
+        voxel_demo.main([*common, "--smoke-test", "--load"])
     with pytest.raises(SystemExit):
-        voxel_demo.main(["--smoke-test", "--autosave"])
+        voxel_demo.main([*common, "--smoke-test", "--autosave"])
+    with pytest.raises(SystemExit):
+        voxel_demo.main([*common, "--smoke-frames", "0"])
+    with pytest.raises(SystemExit):
+        voxel_demo.main([*common, "--render-distance", "-1"])
+    with pytest.raises(SystemExit):
+        voxel_demo.main([*common, "--world-seed", "not-an-integer"])
+    with pytest.raises(SystemExit):
+        voxel_demo.main([*common, "--width", "not-an-integer"])
+    with pytest.raises(SystemExit) as version_exit:
+        voxel_demo.main(["--version"])
+    assert version_exit.value.code == 0
+    assert "Open World RPG 0.9.0" in capsys.readouterr().out
 
 
-def test_voxel_entry_point_reports_runtime_failure(
+def test_voxel_entry_point_writes_crash_report_for_runtime_failure(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     class Application:
         def __init__(self, *, config: VoxelPrototypeConfig) -> None:
-            pass
+            self.config = config
 
         def run(self, *, max_frames: int | None = None) -> int:
+            del max_frames
             raise RuntimeError("failure")
 
     monkeypatch.setattr(voxel_demo, "VoxelPrototypeApplication", Application)
-    assert voxel_demo.main([]) == 1
+    assert voxel_demo.main(["--data-dir", str(tmp_path)]) == 1
+
+    reports = list((tmp_path / "crash-reports").glob("*.json"))
+    assert len(reports) == 1
+    payload = json.loads(reports[0].read_text(encoding="utf-8"))
+    assert payload["exception"]["type"] == "RuntimeError"
+    assert payload["context"]["world_seed"] == 0
+    assert "Crash report:" in capsys.readouterr().err
+
+
+def test_voxel_entry_point_tolerates_crash_report_or_logger_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class Application:
+        def __init__(self, *, config: VoxelPrototypeConfig) -> None:
+            del config
+
+        def run(self, *, max_frames: int | None = None) -> int:
+            del max_frames
+            raise RuntimeError("failure")
+
+    monkeypatch.setattr(voxel_demo, "VoxelPrototypeApplication", Application)
+    monkeypatch.setattr(
+        voxel_demo,
+        "write_crash_report",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("report failed")),
+    )
+    assert voxel_demo.main(["--data-dir", str(tmp_path / "report-failure")]) == 1
+    assert "Crash report:" not in capsys.readouterr().err
+
+    monkeypatch.setattr(
+        voxel_demo,
+        "configure_runtime_logging",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("logging failed")),
+    )
+    assert voxel_demo.main(["--data-dir", str(tmp_path / "logger-failure")]) == 1
+    assert "could not start" in capsys.readouterr().err
 
 
 def test_window_focus_loss_releases_mouse_and_cancels_mining(
@@ -2152,3 +2272,33 @@ def test_progression_overlay_fallback_wrapped_guide_and_playing_hud(
         assert len(objective_surfaces) == 1
     finally:
         pygame.quit()
+
+
+def test_voxel_save_path_is_canonical_and_backup_recovery_is_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_path = tmp_path / "Custom_Save.json"
+    application = VoxelPrototypeApplication(
+        config=VoxelPrototypeConfig(save_path=requested_path, render_distance=0)
+    )
+    canonical_path = tmp_path / "custom_save.json"
+    assert application.save_path == canonical_path.resolve()
+
+    coordinate = WorldBlockCoordinate(x=3, y=10, z=3)
+    application.edits.set_block(coordinate, BlockMaterial.STONE)
+    assert application._save_edits()  # type: ignore[attr-defined]
+    application.edits.set_block(coordinate, BlockMaterial.DIRT)
+    assert application._save_edits()  # type: ignore[attr-defined]
+    canonical_path.write_text("{broken", encoding="utf-8")
+
+    monkeypatch.setattr(application, "_stream", lambda: None)
+    monkeypatch.setattr(
+        "open_world_rpg.ui.voxel.application.ray_cast",
+        lambda **_kwargs: None,
+    )
+
+    assert application._load_edits()  # type: ignore[attr-defined]
+    assert application.edits.get(coordinate).material is BlockMaterial.STONE  # type: ignore[union-attr]
+    assert application.save_message == "World recovered from backup"
+    assert json.loads(canonical_path.read_text(encoding="utf-8"))

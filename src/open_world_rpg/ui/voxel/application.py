@@ -18,7 +18,7 @@ import pygame
 
 from open_world_rpg.application import GameMode, RuntimeContext, create_terrain_runtime
 from open_world_rpg.application.save_service import GameSaveService
-from open_world_rpg.core import ProjectPaths
+from open_world_rpg.core import MAX_WORLD_SEED, ProjectPaths
 from open_world_rpg.gameplay import (
     GUIDE_PAGES,
     CraftingResult,
@@ -131,21 +131,40 @@ class VoxelPrototypeConfig:
     )
 
     def __post_init__(self) -> None:
-        for name, value in (
+        for name, integer_value, minimum, maximum in (
+            ("width_pixels", self.width_pixels, 160, 7680),
+            ("height_pixels", self.height_pixels, 90, 4320),
+            ("target_fps", self.target_fps, 1, 360),
+            ("render_distance", self.render_distance, 0, 8),
+            ("world_seed", self.world_seed, 0, MAX_WORLD_SEED),
+        ):
+            if isinstance(integer_value, bool) or not isinstance(integer_value, int):
+                raise TypeError(f"{name} must be an integer.")
+            if not minimum <= integer_value <= maximum:
+                raise ValueError(f"{name} must be between {minimum} and {maximum}.")
+        if not isinstance(self.hidden_window, bool):
+            raise TypeError("hidden_window must be a boolean.")
+        if not isinstance(self.terrain_config, TerrainGenerationConfig):
+            raise TypeError("terrain_config must be a TerrainGenerationConfig.")
+        for name, numeric_value in (
             ("interaction_reach", self.interaction_reach),
             ("break_cooldown", self.break_cooldown),
             ("placement_cooldown", self.placement_cooldown),
         ):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(numeric_value, bool) or not isinstance(numeric_value, (int, float)):
                 raise TypeError(f"{name} must be a number.")
-            if not math.isfinite(value):
+            if not math.isfinite(numeric_value):
                 raise ValueError(f"{name} must be finite.")
         if self.interaction_reach <= 0:
             raise ValueError("interaction_reach must be greater than zero.")
         if self.break_cooldown < 0 or self.placement_cooldown < 0:
             raise ValueError("interaction cooldowns must be non-negative.")
-        if self.save_path is not None and not isinstance(self.save_path, Path):
-            raise TypeError("save_path must be a pathlib.Path or None.")
+        if self.save_path is not None:
+            if not isinstance(self.save_path, Path):
+                raise TypeError("save_path must be a pathlib.Path or None.")
+            if self.save_path.suffix.lower() != ".json":
+                raise ValueError("save_path must use the .json suffix.")
+            SaveSlot(self.save_path.stem)
         if not isinstance(self.load_on_start, bool):
             raise TypeError("load_on_start must be a boolean.")
         if not isinstance(self.autosave, bool):
@@ -287,16 +306,16 @@ class VoxelPrototypeApplication:
         self._save_slot: SaveSlot | None = None
         self._save_service: GameSaveService | None = None
         if self.save_path is not None:
-            if self.save_path.suffix.lower() != ".json":
-                raise ValueError("save_path must use the .json suffix.")
             self._save_slot = SaveSlot(self.save_path.stem)
             paths = ProjectPaths(
                 project_root=self.save_path.parent,
                 save_directory=self.save_path.parent,
                 log_directory=self.save_path.parent / "logs",
             )
+            storage = RuntimeStorage(paths=paths)
+            self.save_path = storage.save_path(self._save_slot)
             self._save_service = GameSaveService(
-                repository=SaveRepository(storage=RuntimeStorage(paths=paths)),
+                repository=SaveRepository(storage=storage),
                 context=self.session_context,
                 logger=logging.getLogger("open_world_rpg"),
             )
@@ -1677,7 +1696,8 @@ class VoxelPrototypeApplication:
             self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
             return False
         try:
-            document = self._save_service.load(self._save_slot)
+            load_result = self._save_service.load_with_status(self._save_slot)
+            document = load_result.document
             restored = self._save_service.restore_block_edits(
                 document,
                 expected_world_id=self.world_id,
@@ -1767,7 +1787,9 @@ class VoxelPrototypeApplication:
         self._refresh_interaction_previews()
         self.dirty = False
         self.flow.set_continue_available(True)
-        self.save_message = "World loaded"
+        self.save_message = (
+            "World recovered from backup" if load_result.recovered_from_backup else "World loaded"
+        )
         self._feedback_until = pygame.time.get_ticks() / 1000.0 + 1.25
         return True
 

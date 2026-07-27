@@ -30,7 +30,7 @@ from open_world_rpg.persistence.document import (
     PersistedBlockEditOverlay,
     SaveDocument,
 )
-from open_world_rpg.persistence.repository import SaveRepository
+from open_world_rpg.persistence.repository import SaveLoadResult, SaveRepository
 from open_world_rpg.persistence.storage import SaveSlot
 from open_world_rpg.world import BlockEditStore, BlockEditStoreSnapshot
 
@@ -126,11 +126,15 @@ class GameSaveService:
 
     def load(self, slot: SaveSlot) -> SaveDocument:
         """Load and validate a document from a named save slot."""
+        return self.load_with_status(slot).document
+
+    def load_with_status(self, slot: SaveSlot) -> SaveLoadResult:
+        """Load a document and expose whether backup recovery was required."""
         if not isinstance(slot, SaveSlot):
             raise TypeError("slot must be a SaveSlot.")
 
         try:
-            document = self.repository.load(slot)
+            result = self.repository.load_with_status(slot)
         except Exception:
             self.logger.exception(
                 "Game session could not be loaded.",
@@ -141,15 +145,25 @@ class GameSaveService:
             )
             raise
 
+        event = (
+            "persistence.load_recovered"
+            if result.recovered_from_backup
+            else "persistence.load_succeeded"
+        )
+        message = (
+            "Game session recovered from backup."
+            if result.recovered_from_backup
+            else "Game session loaded."
+        )
         self.logger.info(
-            "Game session loaded.",
+            message,
             extra=self._diagnostic_context(
-                event="persistence.load_succeeded",
+                event=event,
                 slot=slot,
-                document=document,
+                document=result.document,
             ),
         )
-        return document
+        return result
 
     def restore_block_edits(
         self,

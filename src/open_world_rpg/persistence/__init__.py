@@ -12,7 +12,9 @@ from open_world_rpg.persistence.document import (
     SessionSnapshot,
 )
 from open_world_rpg.persistence.repository import (
+    SaveLoadResult,
     SaveReadError,
+    SaveRecoveryError,
     SaveRepository,
     SaveRepositoryError,
     SaveSerialisationError,
@@ -21,17 +23,20 @@ from open_world_rpg.persistence.repository import (
 )
 from open_world_rpg.persistence.storage import (
     MAX_SAVE_SLOT_LENGTH,
+    SAVE_BACKUP_SUFFIX,
     SAVE_FILE_SUFFIX,
     RuntimeStorage,
     SaveSlot,
     StorageError,
     StoragePreparationError,
+    StorageRecoveryError,
     StorageWriteError,
 )
 
 __all__ = [
     "CURRENT_SAVE_SCHEMA_VERSION",
     "MAX_SAVE_SLOT_LENGTH",
+    "SAVE_BACKUP_SUFFIX",
     "SAVE_FILE_SUFFIX",
     "JsonValue",
     "PersistedBlockEdit",
@@ -41,7 +46,9 @@ __all__ = [
     "SaveCorruptionError",
     "SaveDocument",
     "SaveDocumentError",
+    "SaveLoadResult",
     "SaveReadError",
+    "SaveRecoveryError",
     "SaveRepository",
     "SaveRepositoryError",
     "SaveSerialisationError",
@@ -51,5 +58,6 @@ __all__ = [
     "SessionSnapshot",
     "StorageError",
     "StoragePreparationError",
+    "StorageRecoveryError",
     "StorageWriteError",
 ]

@@ -285,3 +285,122 @@ def test_load_preserves_compatibility_error(tmp_path: Path) -> None:
         match="Unsupported save schema version 99",
     ):
         repository.load(slot)
+
+
+def test_load_result_validates_fields() -> None:
+    from open_world_rpg.persistence.repository import SaveLoadResult
+
+    document = create_document()
+    assert SaveLoadResult(document=document).document == document
+
+    with pytest.raises(TypeError, match="document"):
+        SaveLoadResult(document=cast(Any, object()))
+    with pytest.raises(TypeError, match="recovered_from_backup"):
+        SaveLoadResult(document=document, recovered_from_backup=cast(Any, 1))
+
+
+def test_load_with_status_reports_primary_load(tmp_path: Path) -> None:
+    repository = create_repository(tmp_path)
+    slot = SaveSlot("campaign-01")
+    expected = create_document()
+    repository.save(slot=slot, document=expected)
+
+    result = repository.load_with_status(slot)
+
+    assert result.document == expected
+    assert not result.recovered_from_backup
+
+
+def test_load_recovers_corrupt_primary_from_rotating_backup(tmp_path: Path) -> None:
+    repository = create_repository(tmp_path)
+    slot = SaveSlot("campaign-01")
+    stable = create_document()
+    replacement = SaveDocument(
+        schema_version=CURRENT_SAVE_SCHEMA_VERSION,
+        saved_at=datetime(2026, 7, 25, 11, 0, tzinfo=UTC),
+        session=stable.session,
+        payload={"player": {"level": 10}},
+    )
+    repository.save(slot=slot, document=stable)
+    repository.save(slot=slot, document=replacement)
+    repository.storage.save_path(slot).write_text("{broken", encoding="utf-8")
+
+    result = repository.load_with_status(slot)
+
+    assert result.document == stable
+    assert result.recovered_from_backup
+    assert repository.load(slot) == stable
+    assert repository.storage.backup_path(slot).read_text(encoding="utf-8") == stable.to_json()
+
+
+def test_load_recovers_missing_or_invalid_utf8_primary_from_backup(tmp_path: Path) -> None:
+    for failure in ("missing", "encoding"):
+        root = tmp_path / failure
+        repository = create_repository(root)
+        slot = SaveSlot("campaign-01")
+        stable = create_document()
+        repository.save(slot=slot, document=stable)
+        repository.save(slot=slot, document=stable)
+        primary = repository.storage.save_path(slot)
+        if failure == "missing":
+            primary.unlink()
+        else:
+            primary.write_bytes(b"\xff\xfe")
+
+        result = repository.load_with_status(slot)
+
+        assert result.document == stable
+        assert result.recovered_from_backup
+        assert primary.read_text(encoding="utf-8") == stable.to_json()
+
+
+def test_load_preserves_primary_failure_when_backup_is_missing_or_invalid(tmp_path: Path) -> None:
+    missing_backup = create_repository(tmp_path / "missing")
+    missing_slot = SaveSlot("campaign-01")
+    missing_backup.storage.prepare()
+    missing_backup.storage.save_path(missing_slot).write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(SaveCorruptionError, match="not valid JSON"):
+        missing_backup.load(missing_slot)
+
+    invalid_backup = create_repository(tmp_path / "invalid")
+    invalid_slot = SaveSlot("campaign-01")
+    invalid_backup.storage.prepare()
+    invalid_backup.storage.save_path(invalid_slot).write_text("{broken", encoding="utf-8")
+    invalid_backup.storage.backup_path(invalid_slot).write_text("{also-broken", encoding="utf-8")
+
+    with pytest.raises(SaveCorruptionError, match="not valid JSON"):
+        invalid_backup.load(invalid_slot)
+
+
+def test_valid_backup_restore_failure_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from open_world_rpg.persistence.repository import SaveRecoveryError
+    from open_world_rpg.persistence.storage import StorageRecoveryError
+
+    repository = create_repository(tmp_path)
+    slot = SaveSlot("campaign-01")
+    stable = create_document()
+    repository.save(slot=slot, document=stable)
+    repository.save(slot=slot, document=stable)
+    repository.storage.save_path(slot).write_text("{broken", encoding="utf-8")
+
+    def fail_restore(self: RuntimeStorage, target: SaveSlot) -> NoReturn:
+        del self, target
+        raise StorageRecoveryError("disk unavailable")
+
+    monkeypatch.setattr(RuntimeStorage, "restore_backup", fail_restore)
+
+    with pytest.raises(SaveRecoveryError, match="valid backup") as error:
+        repository.load(slot)
+
+    assert isinstance(error.value.__cause__, StorageRecoveryError)
+
+
+def test_load_with_status_rejects_invalid_slot(tmp_path: Path) -> None:
+    repository = create_repository(tmp_path)
+
+    with pytest.raises(TypeError, match="slot"):
+        repository.load_with_status(cast(Any, "campaign-01"))

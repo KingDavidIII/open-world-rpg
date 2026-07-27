@@ -15,6 +15,7 @@ from open_world_rpg.persistence.storage import (
     RuntimeStorage,
     SaveSlot,
     StoragePreparationError,
+    StorageRecoveryError,
     StorageWriteError,
 )
 
@@ -271,3 +272,102 @@ def test_cleanup_failure_does_not_hide_write_failure(
         )
 
     assert str(error.value.__cause__) == "replace failed"
+
+
+def test_backup_path_and_file_name_are_canonical(tmp_path: Path) -> None:
+    storage = create_storage(tmp_path)
+    slot = SaveSlot("Campaign-01")
+
+    assert slot.backup_file_name == "campaign-01.backup.json"
+    assert storage.backup_path(slot) == storage.paths.save_directory / slot.backup_file_name
+
+    with pytest.raises(TypeError, match="slot"):
+        storage.backup_path(cast(Any, "campaign-01"))
+
+
+def test_replacing_save_retains_previous_primary_as_backup(tmp_path: Path) -> None:
+    storage = create_storage(tmp_path)
+    slot = SaveSlot("autosave")
+
+    storage.write_save_text(slot=slot, content="first")
+    storage.write_save_text(slot=slot, content="second")
+
+    assert storage.save_path(slot).read_text(encoding="utf-8") == "second"
+    assert storage.backup_path(slot).read_text(encoding="utf-8") == "first"
+
+
+def test_existing_primary_rotation_failure_preserves_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage = create_storage(tmp_path)
+    slot = SaveSlot("autosave")
+    storage.write_save_text(slot=slot, content="stable")
+    real_replace = os.replace
+
+    def reject_backup_rotation(
+        source: os.PathLike[str] | str,
+        destination: os.PathLike[str] | str,
+    ) -> None:
+        if Path(source) == storage.save_path(slot):
+            raise OSError("backup unavailable")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", reject_backup_rotation)
+
+    with pytest.raises(StorageWriteError, match="atomically write"):
+        storage.write_save_text(slot=slot, content="new")
+
+    assert storage.save_path(slot).read_text(encoding="utf-8") == "stable"
+    assert list(storage.paths.save_directory.glob("*.tmp")) == []
+
+
+def test_restore_backup_recreates_primary_without_consuming_backup(tmp_path: Path) -> None:
+    storage = create_storage(tmp_path)
+    slot = SaveSlot("autosave")
+    storage.write_save_text(slot=slot, content="stable")
+    storage.write_save_text(slot=slot, content="new")
+    storage.save_path(slot).write_text("corrupt", encoding="utf-8")
+
+    restored = storage.restore_backup(slot)
+
+    assert restored == storage.save_path(slot)
+    assert restored.read_text(encoding="utf-8") == "stable"
+    assert storage.backup_path(slot).read_text(encoding="utf-8") == "stable"
+
+
+def test_restore_backup_rejects_invalid_slot(tmp_path: Path) -> None:
+    storage = create_storage(tmp_path)
+
+    with pytest.raises(TypeError, match="slot"):
+        storage.restore_backup(cast(Any, "autosave"))
+
+
+def test_restore_backup_wraps_missing_or_replace_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage = create_storage(tmp_path)
+    slot = SaveSlot("autosave")
+
+    with pytest.raises(StorageRecoveryError, match="restore backup") as missing:
+        storage.restore_backup(slot)
+    assert isinstance(missing.value.__cause__, FileNotFoundError)
+
+    storage.write_save_text(slot=slot, content="stable")
+    storage.write_save_text(slot=slot, content="new")
+
+    def reject_restore(
+        source: os.PathLike[str] | str,
+        destination: os.PathLike[str] | str,
+    ) -> NoReturn:
+        del source, destination
+        raise OSError("restore failed")
+
+    monkeypatch.setattr(os, "replace", reject_restore)
+
+    with pytest.raises(StorageRecoveryError, match="restore backup") as failed:
+        storage.restore_backup(slot)
+
+    assert isinstance(failed.value.__cause__, OSError)
+    assert list(storage.paths.save_directory.glob("*.tmp")) == []

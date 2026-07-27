@@ -543,3 +543,28 @@ def test_survival_progression_round_trip_legacy_inference_and_validation(tmp_pat
         service._progression_payload("bad")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         service._parse_progression(cast(Any, []))
+
+
+def test_load_with_status_logs_backup_recovery(tmp_path: Path) -> None:
+    stream = StringIO()
+    service = create_service(tmp_path, stream=stream)
+    slot = SaveSlot("campaign-01")
+    stable = create_document()
+    service.repository.save(slot=slot, document=stable)
+    service.repository.save(slot=slot, document=stable)
+    service.repository.storage.save_path(slot).write_text("{broken", encoding="utf-8")
+
+    result = service.load_with_status(slot)
+    payload = read_payloads(stream)[-1]
+
+    assert result.document == stable
+    assert result.recovered_from_backup
+    assert payload["event"] == "persistence.load_recovered"
+    assert payload["save_slot"] == "campaign-01"
+
+
+def test_load_with_status_rejects_invalid_slot(tmp_path: Path) -> None:
+    service = create_service(tmp_path)
+
+    with pytest.raises(TypeError, match="slot"):
+        service.load_with_status(cast(Any, "campaign-01"))

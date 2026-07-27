@@ -41,6 +41,10 @@ dev = [
     "pytest-cov>=6.2,<7",
     "ruff>=0.12,<1"
 ]
+release = [
+    "build>=1.2,<2",
+    "pyinstaller>=6.14,<7"
+]
 
 [project.scripts]
 open-world-rpg = "open_world_rpg.__main__:main"
