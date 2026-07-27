@@ -183,6 +183,25 @@ def test_break_reports_drop_and_inventory_placement_consumes_atomically() -> Non
         )
 
 
+def test_non_placeable_resource_cannot_be_placed_and_is_not_consumed() -> None:
+    world, edits = make_world()
+    controller = VoxelInteractionController(world=world, edits=edits, placement_cooldown=0)
+    inventory = PlayerInventory()
+    inventory.add(ItemType.WOOD_LOG, 1)
+    before = inventory.snapshot()
+
+    outcome = controller.place_inventory_block(
+        target=hit(coordinate=WorldBlockCoordinate(x=0, y=7, z=0)),
+        inventory=inventory,
+        player=PlayerState(x=4, y=4, z=4),
+        now=0,
+    )
+
+    assert outcome.result is InteractionResult.EMPTY_SLOT
+    assert inventory.snapshot() == before
+    assert edits.snapshot().edits == ()
+
+
 def test_placement_validation_and_success() -> None:
     world, edits = make_world()
     controller = VoxelInteractionController(world=world, edits=edits)

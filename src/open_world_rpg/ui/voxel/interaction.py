@@ -6,7 +6,12 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 
-from open_world_rpg.gameplay import ItemType, PlayerInventory, item_for_material, material_for_item
+from open_world_rpg.gameplay import (
+    ItemType,
+    PlayerInventory,
+    item_for_material,
+    item_policy,
+)
 from open_world_rpg.world import (
     CHUNK_SIZE,
     BlockEditStore,
@@ -224,7 +229,7 @@ class VoxelInteractionController:
         stack = inventory.selected_stack
         outcome = self.place_block(
             target=target,
-            material=None if stack is None else material_for_item(stack.item),
+            material=(None if stack is None else item_policy(stack.item).placeable_material),
             player=player,
             now=now,
         )

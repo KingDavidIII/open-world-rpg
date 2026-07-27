@@ -34,7 +34,6 @@ from open_world_rpg.gameplay import (
     ToolInstance,
     create_bootstrap_inventory,
     item_policy,
-    material_for_item,
 )
 from open_world_rpg.persistence import RuntimeStorage, SaveRepository, SaveSlot
 from open_world_rpg.world import (
@@ -402,7 +401,9 @@ class VoxelPrototypeApplication:
         """Compatibility projection over the authoritative inventory hotbar."""
         return VoxelHotbar(
             slots=tuple(
-                None if not isinstance(slot, ItemStack) else material_for_item(slot.item)
+                None
+                if not isinstance(slot, ItemStack)
+                else item_policy(slot.item).placeable_material
                 for slot in self.inventory.slots()[:9]
             ),
             selected_index=self.inventory.selected_hotbar_index,
@@ -1519,7 +1520,7 @@ class VoxelPrototypeApplication:
 
     def _selected_placement_material(self) -> BlockMaterial | None:
         stack = self.inventory.selected_stack
-        return None if stack is None else material_for_item(stack.item)
+        return None if stack is None else item_policy(stack.item).placeable_material
 
     def _refresh_interaction_previews(self) -> None:
         self.break_preview = self.interactions.preview_break(target=self.target)

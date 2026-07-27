@@ -1207,6 +1207,29 @@ def test_contextual_interaction_prompt_covers_capture_target_tool_block_and_empt
     assert "Select a block to place" in application._interaction_prompt()  # type: ignore[attr-defined]
 
 
+def test_non_placeable_resource_selection_is_safe_for_hotbar_and_preview() -> None:
+    application = VoxelPrototypeApplication()
+    application.inventory.clear()
+    assert application.inventory.add(ItemType.WOOD_LOG, 1).accepted == 1
+    application.target = RayHit(
+        x=0,
+        y=7,
+        z=0,
+        distance=1.0,
+        material=BlockMaterial.GRASS,
+        face_normal=(0, 1, 0),
+    )
+
+    assert application.hotbar.slots[0] is None
+    assert (
+        application._selected_placement_material() is None  # type: ignore[attr-defined]
+    )
+
+    application._refresh_interaction_previews()  # type: ignore[attr-defined]
+
+    assert application.placement_preview.result is InteractionResult.EMPTY_SLOT
+
+
 def test_invalid_break_preview_cancels_active_mining() -> None:
     application = VoxelPrototypeApplication()
     application.mouse_captured = True
